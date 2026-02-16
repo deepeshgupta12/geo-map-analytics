@@ -1,5 +1,10 @@
 import Image from "next/image";
 import styles from "./page.module.css";
+import MapView from "@/components/MapView";
+
+export default function Home() {
+  return <MapView />;
+}
 
 export default function Home() {
   return (
