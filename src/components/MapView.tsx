@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import mapboxgl, { LngLatBoundsLike, Map, MapMouseEvent } from "mapbox-gl";
+import mapboxgl, { Map, MapMouseEvent } from "mapbox-gl";
 import { TILESETS } from "@/config/tilesets";
 
 type PickInfo = {
@@ -37,7 +37,7 @@ type PinnedSelection = {
   level: ChoroplethLevel;
   joinKey: string;
   displayName: string;
-  featureId: unknown; // numeric id for micromarkets; vector feature id for localities (not used for filter)
+  featureId: unknown;
   lngLat: { lng: number; lat: number };
 };
 
@@ -53,8 +53,8 @@ const HIT_LAYERS = {
   projects: "projects-hit",
 } as const;
 
-// Pinned highlight layers (rendered from vector sources + filters; not from clipped geometry)
-const PIN_LAYERS = {
+// V2 highlight overlay layers (polygons only)
+const HIGHLIGHT = {
   mmFill: "pinned-mm-fill",
   mmLine: "pinned-mm-line",
   locFill: "pinned-loc-fill",
@@ -85,207 +85,60 @@ function getStrProp(props: Record<string, unknown> | null | undefined, key: stri
   return typeof v === "string" ? v : "";
 }
 
-function setLayerVisibility(map: Map, layerId: string, visible: boolean) {
-  if (!map.getLayer(layerId)) return;
-  map.setLayoutProperty(layerId, "visibility", visible ? "visible" : "none");
+function clamp(n: number, lo: number, hi: number) {
+  return Math.max(lo, Math.min(hi, n));
 }
 
-function targetToLayerId(target: InspectTarget) {
-  // Use HIT layers so querying is reliable
-  switch (target) {
-    case "localities":
-      return HIT_LAYERS.localities;
-    case "micromarkets":
-      return HIT_LAYERS.micromarkets;
-    case "projects":
-      return HIT_LAYERS.projects;
-    case "roads":
-      return HIT_LAYERS.roads;
-    case "city":
-      return HIT_LAYERS.city;
-  }
+function percentile(sorted: number[], p: number) {
+  if (!sorted.length) return null;
+  const idx = (sorted.length - 1) * p;
+  const lo = Math.floor(idx);
+  const hi = Math.ceil(idx);
+  if (lo === hi) return sorted[lo];
+  const w = idx - lo;
+  return sorted[lo] * (1 - w) + sorted[hi] * w;
 }
 
-function computeBoundsFromGeoJSONGeometry(geom: any): mapboxgl.LngLatBounds | null {
-  if (!geom || !geom.type || !geom.coordinates) return null;
+function bboxFromFeatures(features: any[]) {
+  let minLng = Number.POSITIVE_INFINITY;
+  let minLat = Number.POSITIVE_INFINITY;
+  let maxLng = Number.NEGATIVE_INFINITY;
+  let maxLat = Number.NEGATIVE_INFINITY;
 
-  const bounds = new mapboxgl.LngLatBounds();
-
-  const extend = (lng: number, lat: number) => {
+  const pushCoord = (lng: number, lat: number) => {
     if (!Number.isFinite(lng) || !Number.isFinite(lat)) return;
-    bounds.extend([lng, lat]);
+    minLng = Math.min(minLng, lng);
+    minLat = Math.min(minLat, lat);
+    maxLng = Math.max(maxLng, lng);
+    maxLat = Math.max(maxLat, lat);
   };
 
-  const walkCoords = (coords: any) => {
-    if (!coords) return;
-    // coordinate = [lng, lat]
-    if (Array.isArray(coords) && coords.length === 2 && typeof coords[0] === "number" && typeof coords[1] === "number") {
-      extend(coords[0], coords[1]);
-      return;
-    }
-    // nested arrays
-    if (Array.isArray(coords)) {
-      for (const c of coords) walkCoords(c);
-    }
-  };
+  for (const f of features) {
+    const g = f?.geometry;
+    if (!g) continue;
 
-  walkCoords(geom.coordinates);
+    // Polygon: [ [ [lng,lat], ... ] , ... ]
+    // MultiPolygon: [ [ [ [lng,lat], ... ] , ... ] , ... ]
+    if (g.type === "Polygon") {
+      for (const ring of g.coordinates ?? []) {
+        for (const c of ring ?? []) pushCoord(c?.[0], c?.[1]);
+      }
+    } else if (g.type === "MultiPolygon") {
+      for (const poly of g.coordinates ?? []) {
+        for (const ring of poly ?? []) {
+          for (const c of ring ?? []) pushCoord(c?.[0], c?.[1]);
+        }
+      }
+    }
+  }
 
-  try {
-    // if never extended, bounds is invalid
-    const sw = bounds.getSouthWest();
-    const ne = bounds.getNorthEast();
-    if (!Number.isFinite(sw.lng) || !Number.isFinite(ne.lng)) return null;
-  } catch {
+  if (!Number.isFinite(minLng) || !Number.isFinite(minLat) || !Number.isFinite(maxLng) || !Number.isFinite(maxLat)) {
     return null;
   }
-
-  return bounds;
-}
-
-function ensurePinnedLayers(map: Map) {
-  // Add pinned layers once (they can stay hidden until a pin happens)
-  if (!map.getLayer(PIN_LAYERS.mmFill)) {
-    map.addLayer({
-      id: PIN_LAYERS.mmFill,
-      type: "fill",
-      source: "micromarkets-src",
-      "source-layer": TILESETS.micromarkets.sourceLayer,
-      paint: {
-        "fill-color": "#F97316",
-        "fill-opacity": 0.10,
-      },
-      filter: ["==", ["id"], -1],
-    });
-  }
-
-  if (!map.getLayer(PIN_LAYERS.mmLine)) {
-    map.addLayer({
-      id: PIN_LAYERS.mmLine,
-      type: "line",
-      source: "micromarkets-src",
-      "source-layer": TILESETS.micromarkets.sourceLayer,
-      paint: {
-        "line-color": "#F97316",
-        "line-width": 3,
-      },
-      filter: ["==", ["id"], -1],
-    });
-  }
-
-  if (!map.getLayer(PIN_LAYERS.locFill)) {
-    map.addLayer({
-      id: PIN_LAYERS.locFill,
-      type: "fill",
-      source: "localities-src",
-      "source-layer": TILESETS.localities.sourceLayer,
-      paint: {
-        "fill-color": "#F97316",
-        "fill-opacity": 0.10,
-      },
-      filter: ["==", "LocalityName", "__never__"],
-    });
-  }
-
-  if (!map.getLayer(PIN_LAYERS.locLine)) {
-    map.addLayer({
-      id: PIN_LAYERS.locLine,
-      type: "line",
-      source: "localities-src",
-      "source-layer": TILESETS.localities.sourceLayer,
-      paint: {
-        "line-color": "#F97316",
-        "line-width": 3,
-      },
-      filter: ["==", "LocalityName", "__never__"],
-    });
-  }
-}
-
-function applyPinnedHighlight(map: Map, pinned: PinnedSelection | null, showMicromarkets: boolean, showLocalities: boolean) {
-  // Hide everything by default
-  const hideAll = () => {
-    setLayerVisibility(map, PIN_LAYERS.mmFill, false);
-    setLayerVisibility(map, PIN_LAYERS.mmLine, false);
-    setLayerVisibility(map, PIN_LAYERS.locFill, false);
-    setLayerVisibility(map, PIN_LAYERS.locLine, false);
-  };
-
-  if (!pinned) {
-    hideAll();
-    return;
-  }
-
-  // Make sure highlight layers exist
-  ensurePinnedLayers(map);
-
-  if (pinned.level === "micromarkets") {
-    // Show mm highlight only if mm layer is visible
-    setLayerVisibility(map, PIN_LAYERS.mmFill, showMicromarkets);
-    setLayerVisibility(map, PIN_LAYERS.mmLine, showMicromarkets);
-
-    setLayerVisibility(map, PIN_LAYERS.locFill, false);
-    setLayerVisibility(map, PIN_LAYERS.locLine, false);
-
-    const idNum = Number(pinned.joinKey);
-    // Filter by feature id across tiles
-    map.setFilter(PIN_LAYERS.mmFill, ["==", ["id"], Number.isFinite(idNum) ? idNum : -1]);
-    map.setFilter(PIN_LAYERS.mmLine, ["==", ["id"], Number.isFinite(idNum) ? idNum : -1]);
-  } else {
-    // Show locality highlight only if locality layer is visible
-    setLayerVisibility(map, PIN_LAYERS.locFill, showLocalities);
-    setLayerVisibility(map, PIN_LAYERS.locLine, showLocalities);
-
-    setLayerVisibility(map, PIN_LAYERS.mmFill, false);
-    setLayerVisibility(map, PIN_LAYERS.mmLine, false);
-
-    // Filter by LocalityName across tiles
-    map.setFilter(PIN_LAYERS.locFill, ["==", "LocalityName", pinned.joinKey]);
-    map.setFilter(PIN_LAYERS.locLine, ["==", "LocalityName", pinned.joinKey]);
-  }
-}
-
-function zoomToPinned(map: Map, pinned: PinnedSelection) {
-  const isMm = pinned.level === "micromarkets";
-
-  const sourceId = isMm ? "micromarkets-src" : "localities-src";
-  const sourceLayer = isMm ? TILESETS.micromarkets.sourceLayer : TILESETS.localities.sourceLayer;
-
-  if (!map.getSource(sourceId)) return;
-
-  // IMPORTANT:
-  // querySourceFeatures returns feature fragments, but combining them gives us full bounds.
-  const filter = isMm
-    ? ((): any => {
-        const idNum = Number(pinned.joinKey);
-        return ["==", ["id"], Number.isFinite(idNum) ? idNum : -1];
-      })()
-    : (["==", "LocalityName", pinned.joinKey] as any);
-
-  const feats = map.querySourceFeatures(sourceId, { sourceLayer, filter }) as any[];
-  if (!feats?.length) {
-    // fallback: center around click point
-    map.easeTo({ center: [pinned.lngLat.lng, pinned.lngLat.lat], zoom: Math.max(map.getZoom(), 12), duration: 450 });
-    return;
-  }
-
-  let bounds: mapboxgl.LngLatBounds | null = null;
-  for (const f of feats) {
-    const b = computeBoundsFromGeoJSONGeometry(f?.geometry);
-    if (!b) continue;
-    bounds = bounds ? bounds.extend(b) : b;
-  }
-
-  if (!bounds) {
-    map.easeTo({ center: [pinned.lngLat.lng, pinned.lngLat.lat], zoom: Math.max(map.getZoom(), 12), duration: 450 });
-    return;
-  }
-
-  map.fitBounds(bounds as unknown as LngLatBoundsLike, {
-    padding: { top: 60, bottom: 60, left: 60, right: 460 }, // account for right inspector
-    duration: 550,
-    maxZoom: 13.5,
-  });
+  return [
+    [minLng, minLat] as [number, number],
+    [maxLng, maxLat] as [number, number],
+  ] as const;
 }
 
 export default function MapView() {
@@ -319,13 +172,17 @@ export default function MapView() {
   const [mmDoc, setMmDoc] = useState<MetricsDoc | null>(null);
   const [locDoc, setLocDoc] = useState<MetricsDoc | null>(null);
 
+  // Dynamic choropleth stops based on viewport (p20/p40/p60/p80)
+  const [dynStops, setDynStops] = useState<number[] | null>(null);
+
   // Legend stats
   const [legend, setLegend] = useState<{
     min: number | null;
     max: number | null;
     count: number;
     missing: number;
-  }>({ min: null, max: null, count: 0, missing: 0 });
+    coveragePct: number | null;
+  }>({ min: null, max: null, count: 0, missing: 0, coveragePct: null });
 
   // V2 pinned selection (only for micromarkets/localities polygons)
   const [pinned, setPinned] = useState<PinnedSelection | null>(null);
@@ -340,18 +197,6 @@ export default function MapView() {
       roads: `mapbox://${TILESETS.roads.id}`,
       projects: `mapbox://${TILESETS.projects.id}`,
     };
-  }, []);
-
-  // ESC clears pinned (and click details)
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        setPinned(null);
-        setClickInfo(null);
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
   }, []);
 
   // -----------------------------
@@ -529,13 +374,44 @@ export default function MapView() {
         paint: { "circle-radius": 10, "circle-opacity": 0 },
       });
 
-      // Pinned highlight layers (must be above base layers; geometry-free, filter-based)
-      ensurePinnedLayers(map);
-      // start hidden
-      setLayerVisibility(map, PIN_LAYERS.mmFill, false);
-      setLayerVisibility(map, PIN_LAYERS.mmLine, false);
-      setLayerVisibility(map, PIN_LAYERS.locFill, false);
-      setLayerVisibility(map, PIN_LAYERS.locLine, false);
+      // -----------------------------
+      // V2 pinned highlight overlays (full polygon via vector filter)
+      // -----------------------------
+      map.addLayer({
+        id: HIGHLIGHT.mmFill,
+        type: "fill",
+        source: "micromarkets-src",
+        "source-layer": TILESETS.micromarkets.sourceLayer,
+        paint: { "fill-color": "#F59E0B", "fill-opacity": 0.12 },
+        filter: ["==", ["id"], "__none__"],
+      });
+
+      map.addLayer({
+        id: HIGHLIGHT.mmLine,
+        type: "line",
+        source: "micromarkets-src",
+        "source-layer": TILESETS.micromarkets.sourceLayer,
+        paint: { "line-color": "#F59E0B", "line-width": 3 },
+        filter: ["==", ["id"], "__none__"],
+      });
+
+      map.addLayer({
+        id: HIGHLIGHT.locFill,
+        type: "fill",
+        source: "localities-src",
+        "source-layer": TILESETS.localities.sourceLayer,
+        paint: { "fill-color": "#F59E0B", "fill-opacity": 0.12 },
+        filter: ["==", ["get", "LocalityName"], "__none__"],
+      });
+
+      map.addLayer({
+        id: HIGHLIGHT.locLine,
+        type: "line",
+        source: "localities-src",
+        "source-layer": TILESETS.localities.sourceLayer,
+        paint: { "line-color": "#F59E0B", "line-width": 3 },
+        filter: ["==", ["get", "LocalityName"], "__none__"],
+      });
 
       // Inspector handlers
       const onMove = (e: MapMouseEvent) => {
@@ -589,7 +465,7 @@ export default function MapView() {
           lngLat: { lng: e.lngLat.lng, lat: e.lngLat.lat },
         });
 
-        // V2: Pinned selection only for polygon levels (Option A)
+        // V2: Pinned selection only for polygon levels
         const fid = (f as any).id ?? null;
 
         if (layer === HIT_LAYERS.micromarkets && fid !== null) {
@@ -632,23 +508,15 @@ export default function MapView() {
   }, [token, vectorSources]);
 
   // -----------------------------
-  // Keep pinned highlight in sync (and zoom when pin changes)
+  // ESC to clear pinned
   // -----------------------------
   useEffect(() => {
-    const map = mapRef.current;
-    if (!map) return;
-
-    applyPinnedHighlight(map, pinned, showMicromarkets, showLocalities);
-
-    if (pinned) {
-      // wait a tick so filters/tiles settle
-      window.setTimeout(() => {
-        const m = mapRef.current;
-        if (!m) return;
-        zoomToPinned(m, pinned);
-      }, 0);
-    }
-  }, [pinned, showMicromarkets, showLocalities]);
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key === "Escape") setPinned(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   // -----------------------------
   // Layer visibility toggles (+ keep hit layers in sync)
@@ -678,9 +546,12 @@ export default function MapView() {
     // City hit always on (city outline always on)
     setLayerVisibility(map, HIT_LAYERS.city, true);
 
-    // Keep pinned layers aligned with toggles
-    applyPinnedHighlight(map, pinned, showMicromarkets, showLocalities);
-  }, [showLocalities, showMicromarkets, showProjects, showRoads, pinned]);
+    // Highlight overlay should respect layer visibility
+    setLayerVisibility(map, HIGHLIGHT.mmFill, showMicromarkets);
+    setLayerVisibility(map, HIGHLIGHT.mmLine, showMicromarkets);
+    setLayerVisibility(map, HIGHLIGHT.locFill, showLocalities);
+    setLayerVisibility(map, HIGHLIGHT.locLine, showLocalities);
+  }, [showLocalities, showMicromarkets, showProjects, showRoads]);
 
   // -----------------------------
   // Light preset runtime
@@ -731,7 +602,62 @@ export default function MapView() {
   }, [enable3D]);
 
   // -----------------------------
-  // V1 Choropleth: paint config
+  // V2 pinned highlight: set filters + zoom-to
+  // -----------------------------
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    if (!map.isStyleLoaded()) return;
+
+    // reset highlight filters
+    if (!pinned) {
+      if (map.getLayer(HIGHLIGHT.mmFill)) map.setFilter(HIGHLIGHT.mmFill, ["==", ["id"], "__none__"]);
+      if (map.getLayer(HIGHLIGHT.mmLine)) map.setFilter(HIGHLIGHT.mmLine, ["==", ["id"], "__none__"]);
+      if (map.getLayer(HIGHLIGHT.locFill)) map.setFilter(HIGHLIGHT.locFill, ["==", ["get", "LocalityName"], "__none__"]);
+      if (map.getLayer(HIGHLIGHT.locLine)) map.setFilter(HIGHLIGHT.locLine, ["==", ["get", "LocalityName"], "__none__"]);
+      return;
+    }
+
+    if (pinned.level === "micromarkets") {
+      // show mm highlight only
+      if (map.getLayer(HIGHLIGHT.mmFill)) map.setFilter(HIGHLIGHT.mmFill, ["==", ["id"], pinned.featureId as any]);
+      if (map.getLayer(HIGHLIGHT.mmLine)) map.setFilter(HIGHLIGHT.mmLine, ["==", ["id"], pinned.featureId as any]);
+      if (map.getLayer(HIGHLIGHT.locFill)) map.setFilter(HIGHLIGHT.locFill, ["==", ["get", "LocalityName"], "__none__"]);
+      if (map.getLayer(HIGHLIGHT.locLine)) map.setFilter(HIGHLIGHT.locLine, ["==", ["get", "LocalityName"], "__none__"]);
+    } else {
+      // show locality highlight only
+      if (map.getLayer(HIGHLIGHT.locFill)) map.setFilter(HIGHLIGHT.locFill, ["==", ["get", "LocalityName"], pinned.joinKey]);
+      if (map.getLayer(HIGHLIGHT.locLine)) map.setFilter(HIGHLIGHT.locLine, ["==", ["get", "LocalityName"], pinned.joinKey]);
+      if (map.getLayer(HIGHLIGHT.mmFill)) map.setFilter(HIGHLIGHT.mmFill, ["==", ["id"], "__none__"]);
+      if (map.getLayer(HIGHLIGHT.mmLine)) map.setFilter(HIGHLIGHT.mmLine, ["==", ["id"], "__none__"]);
+    }
+
+    // zoom-to after render settles (idle)
+    const layerForBbox = pinned.level === "micromarkets" ? HIGHLIGHT.mmFill : HIGHLIGHT.locFill;
+
+    const onIdle = () => {
+      try {
+        const feats = map.queryRenderedFeatures({ layers: [layerForBbox] }) as any[];
+        const bb = bboxFromFeatures(feats);
+        if (bb) {
+          map.fitBounds(bb, { padding: 60, duration: 450 });
+        } else {
+          // fallback: small easeTo using click lngLat
+          map.easeTo({ center: [pinned.lngLat.lng, pinned.lngLat.lat], duration: 350, zoom: Math.max(map.getZoom(), 11) });
+        }
+      } catch {
+        // ignore
+      }
+    };
+
+    map.once("idle", onIdle);
+    return () => {
+      // once() cleans itself
+    };
+  }, [pinned]);
+
+  // -----------------------------
+  // V1 Choropleth: paint config (uses dynStops if available)
   // -----------------------------
   useEffect(() => {
     const map = mapRef.current;
@@ -750,6 +676,8 @@ export default function MapView() {
 
     const valueExpr: any = ["coalesce", ["feature-state", "v"], -1];
 
+    const stops = dynStops && dynStops.length === 4 ? dynStops : [5000, 15000, 25000, 35000];
+
     map.setPaintProperty(fillLayer, "fill-color", [
       "case",
       ["<=", valueExpr, -1],
@@ -758,15 +686,15 @@ export default function MapView() {
         "interpolate",
         ["linear"],
         valueExpr,
-        5000,
+        stops[0],
         "#E0F2FE",
-        15000,
+        stops[1],
         "#93C5FD",
-        25000,
+        stops[2],
         "#60A5FA",
-        35000,
+        stops[3],
         "#3B82F6",
-        50000,
+        Math.max(stops[3] + 1, stops[3] * 1.2),
         "#1D4ED8",
       ],
     ]);
@@ -777,17 +705,18 @@ export default function MapView() {
       0.04,
       isMm ? 0.28 : 0.24,
     ]);
-  }, [enableChoropleth, choroplethLevel]);
+  }, [enableChoropleth, choroplethLevel, dynStops]);
 
   // -----------------------------
-  // V1 Choropleth: apply feature-state for visible features
+  // V1 Choropleth: apply feature-state for visible features + compute legend + dynStops
   // -----------------------------
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
 
     if (!enableChoropleth) {
-      setLegend({ min: null, max: null, count: 0, missing: 0 });
+      setLegend({ min: null, max: null, count: 0, missing: 0, coveragePct: null });
+      setDynStops(null);
       return;
     }
 
@@ -815,6 +744,8 @@ export default function MapView() {
       let count = 0;
       let missing = 0;
 
+      const values: number[] = [];
+
       for (const f of features) {
         const fid = f?.id;
         if (fid === undefined || fid === null) continue;
@@ -832,6 +763,7 @@ export default function MapView() {
 
         if (typeof v === "number" && Number.isFinite(v)) {
           count += 1;
+          values.push(v);
           min = Math.min(min, v);
           max = Math.max(max, v);
           map.setFeatureState({ source: sourceId, sourceLayer, id: fid }, { v, n: bucket?.n ?? null });
@@ -841,12 +773,44 @@ export default function MapView() {
         }
       }
 
+      // Legend coverage
+      const total = count + missing;
+      const coveragePct = total > 0 ? Math.round((count / total) * 100) : null;
+
       setLegend({
         min: count > 0 ? min : null,
         max: count > 0 ? max : null,
         count,
         missing,
+        coveragePct,
       });
+
+      // Dynamic stops from viewport percentiles
+      if (values.length >= 8) {
+        values.sort((a, b) => a - b);
+        const p20 = percentile(values, 0.2);
+        const p40 = percentile(values, 0.4);
+        const p60 = percentile(values, 0.6);
+        const p80 = percentile(values, 0.8);
+
+        if (
+          typeof p20 === "number" &&
+          typeof p40 === "number" &&
+          typeof p60 === "number" &&
+          typeof p80 === "number"
+        ) {
+          // ensure increasing
+          const s0 = Math.max(1, p20);
+          const s1 = Math.max(s0 + 1, p40);
+          const s2 = Math.max(s1 + 1, p60);
+          const s3 = Math.max(s2 + 1, p80);
+          setDynStops([s0, s1, s2, s3]);
+        } else {
+          setDynStops(null);
+        }
+      } else {
+        setDynStops(null);
+      }
     };
 
     computeLegendAndApply();
@@ -982,7 +946,21 @@ export default function MapView() {
               <div>
                 Viewport: <span style={{ fontWeight: 600 }}>{legend.count}</span> colored,{" "}
                 <span style={{ fontWeight: 600 }}>{legend.missing}</span> missing
+                {typeof legend.coveragePct === "number" ? (
+                  <>
+                    {" "}
+                    (<span style={{ fontWeight: 600 }}>{legend.coveragePct}%</span> coverage)
+                  </>
+                ) : null}
               </div>
+              {dynStops && dynStops.length === 4 ? (
+                <div style={{ opacity: 0.85 }}>
+                  Scale (viewport): p20 {fmtMoney(dynStops[0])}, p40 {fmtMoney(dynStops[1])}, p60 {fmtMoney(dynStops[2])}, p80{" "}
+                  {fmtMoney(dynStops[3])}
+                </div>
+              ) : (
+                <div style={{ opacity: 0.75 }}>Scale: fallback thresholds (insufficient viewport samples)</div>
+              )}
             </div>
 
             <div style={{ marginTop: 8, display: "grid", gap: 6 }}>
@@ -1015,10 +993,7 @@ export default function MapView() {
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
               <div style={{ fontWeight: 600 }}>Pinned (click a Micromarket/Locality polygon)</div>
               <button
-                onClick={() => {
-                  setPinned(null);
-                  setClickInfo(null);
-                }}
+                onClick={() => setPinned(null)}
                 style={{
                   fontSize: 12,
                   padding: "6px 8px",
@@ -1036,7 +1011,7 @@ export default function MapView() {
 
             {!pinned ? (
               <div style={{ fontSize: 12, opacity: 0.75, marginTop: 6 }}>
-                Tip: set Inspect target to Micromarkets or Localities, then click a polygon.
+                Tip: set Inspect target to Micromarkets or Localities, then click a polygon. Press ESC to clear.
               </div>
             ) : (
               <div style={{ marginTop: 8, fontSize: 12, opacity: 0.92, display: "grid", gap: 6 }}>
@@ -1055,14 +1030,10 @@ export default function MapView() {
                 <div>
                   Month value (psf):{" "}
                   <span style={{ fontWeight: 600 }}>
-                    {pinnedCurrent?.v !== undefined && typeof pinnedCurrent?.v === "number"
-                      ? fmtMoney(pinnedCurrent.v)
-                      : "-"}
-                  </span>
-                  {"  "}
+                    {pinnedCurrent?.v !== undefined && typeof pinnedCurrent?.v === "number" ? fmtMoney(pinnedCurrent.v) : "-"}
+                  </span>{" "}
                   <span style={{ opacity: 0.85 }}>
-                    (n:{" "}
-                    {pinnedCurrent?.n !== undefined && typeof pinnedCurrent?.n === "number" ? pinnedCurrent.n : "-"})
+                    (n: {pinnedCurrent?.n !== undefined && typeof pinnedCurrent?.n === "number" ? pinnedCurrent.n : "-"})
                   </span>
                 </div>
 
@@ -1091,10 +1062,22 @@ export default function MapView() {
                               <td style={{ padding: "8px 10px", borderBottom: "1px solid #f3f4f6" }}>
                                 {parseMonthLabel(r.month)}
                               </td>
-                              <td style={{ padding: "8px 10px", textAlign: "right", borderBottom: "1px solid #f3f4f6" }}>
+                              <td
+                                style={{
+                                  padding: "8px 10px",
+                                  textAlign: "right",
+                                  borderBottom: "1px solid #f3f4f6",
+                                }}
+                              >
                                 {typeof r.v === "number" ? fmtMoney(r.v) : "-"}
                               </td>
-                              <td style={{ padding: "8px 10px", textAlign: "right", borderBottom: "1px solid #f3f4f6" }}>
+                              <td
+                                style={{
+                                  padding: "8px 10px",
+                                  textAlign: "right",
+                                  borderBottom: "1px solid #f3f4f6",
+                                }}
+                              >
                                 {typeof r.n === "number" ? r.n : "-"}
                               </td>
                             </tr>
@@ -1222,17 +1205,35 @@ export default function MapView() {
               <li>
                 Localities: join by <code>properties.LocalityName</code> (matches JSON keys)
               </li>
-              <li>Projects: (later) can support point metrics similarly</li>
+              <li>Projects: later can support point metrics similarly</li>
             </ul>
           </div>
           <div style={{ marginTop: 8 }}>
             Inspector hit-testing uses transparent hit layers (thicker lines / larger points) so hover/click works reliably.
           </div>
-          <div style={{ marginTop: 8 }}>
-            Pinned highlight uses vector-source filters (not clicked geometry) so the full polygon is outlined correctly.
-          </div>
         </div>
       </div>
     </div>
   );
+}
+
+function targetToLayerId(target: InspectTarget) {
+  // Use HIT layers so querying is reliable
+  switch (target) {
+    case "localities":
+      return HIT_LAYERS.localities;
+    case "micromarkets":
+      return HIT_LAYERS.micromarkets;
+    case "projects":
+      return HIT_LAYERS.projects;
+    case "roads":
+      return HIT_LAYERS.roads;
+    case "city":
+      return HIT_LAYERS.city;
+  }
+}
+
+function setLayerVisibility(map: Map, layerId: string, visible: boolean) {
+  if (!map.getLayer(layerId)) return;
+  map.setLayoutProperty(layerId, "visibility", visible ? "visible" : "none");
 }
