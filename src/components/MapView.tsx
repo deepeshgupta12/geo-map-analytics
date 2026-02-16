@@ -7,6 +7,8 @@ import { TILESETS } from "@/config/tilesets";
 type PickInfo = {
   layerId: string;
   sourceLayer: string;
+  featureId: unknown;
+  propertyKeys: string[];
   properties: Record<string, unknown>;
   lngLat: { lng: number; lat: number };
 };
@@ -152,10 +154,13 @@ export default function MapView() {
         map.getCanvas().style.cursor = "pointer";
 
         const f = features[0];
+        const props = (f.properties ?? {}) as Record<string, unknown>;
         setHoverInfo({
           layerId: f.layer.id,
           sourceLayer: (f.layer as any)["source-layer"] ?? "",
-          properties: (f.properties ?? {}) as Record<string, unknown>,
+          featureId: (f as any).id ?? null,
+          propertyKeys: Object.keys(props),
+          properties: props,
           lngLat: { lng: e.lngLat.lng, lat: e.lngLat.lat },
         });
       };
@@ -171,10 +176,13 @@ export default function MapView() {
           return;
         }
         const f = features[0];
+        const props = (f.properties ?? {}) as Record<string, unknown>;
         setClickInfo({
           layerId: f.layer.id,
           sourceLayer: (f.layer as any)["source-layer"] ?? "",
-          properties: (f.properties ?? {}) as Record<string, unknown>,
+          featureId: (f as any).id ?? null,
+          propertyKeys: Object.keys(props),
+          properties: props,
           lngLat: { lng: e.lngLat.lng, lat: e.lngLat.lat },
         });
       };
