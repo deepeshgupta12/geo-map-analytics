@@ -36,6 +36,15 @@ type MetricsDoc = {
 const DEFAULT_CENTER: [number, number] = [72.8777, 19.076]; // Mumbai
 const DEFAULT_ZOOM = 10.5;
 
+// Invisible “hit” layers for reliable picking
+const HIT_LAYERS = {
+  city: "city-hit",
+  micromarkets: "micromarkets-hit",
+  localities: "localities-hit",
+  roads: "roads-hit",
+  projects: "projects-hit",
+} as const;
+
 function safeJson(v: unknown) {
   try {
     return JSON.stringify(v, null, 2);
@@ -45,20 +54,14 @@ function safeJson(v: unknown) {
 }
 
 function fmtMoney(v: number) {
-  // price psf; keep simple
   if (!Number.isFinite(v)) return "-";
   return v.toLocaleString("en-IN", { maximumFractionDigits: 0 });
 }
 
 function parseMonthLabel(yyyyMm01: string) {
-  // "2024-07-01" -> "Jul 2024"
   const d = new Date(yyyyMm01 + "T00:00:00Z");
   if (Number.isNaN(d.getTime())) return yyyyMm01;
   return d.toLocaleString("en-US", { month: "short", year: "numeric" });
-}
-
-function clamp(n: number, lo: number, hi: number) {
-  return Math.min(Math.max(n, lo), hi);
 }
 
 export default function MapView() {
@@ -69,12 +72,11 @@ export default function MapView() {
   const [clickInfo, setClickInfo] = useState<PickInfo | null>(null);
 
   const [inspectTarget, setInspectTarget] = useState<InspectTarget>("localities");
-    // --- FIX: keep latest inspectTarget for map event handlers (avoids stale closure)
-  const inspectTargetRef = useRef<InspectTarget>("localities");
-
+  const inspectTargetRef = useRef<InspectTarget>(inspectTarget);
   useEffect(() => {
     inspectTargetRef.current = inspectTarget;
   }, [inspectTarget]);
+
   const [showLocalities, setShowLocalities] = useState(true);
   const [showMicromarkets, setShowMicromarkets] = useState(true);
   const [showProjects, setShowProjects] = useState(true);
@@ -93,7 +95,7 @@ export default function MapView() {
   const [mmDoc, setMmDoc] = useState<MetricsDoc | null>(null);
   const [locDoc, setLocDoc] = useState<MetricsDoc | null>(null);
 
-  // Legend stats (computed per month + level)
+  // Legend stats
   const [legend, setLegend] = useState<{
     min: number | null;
     max: number | null;
@@ -137,11 +139,9 @@ export default function MapView() {
         setMmDoc(mm);
         setLocDoc(loc);
 
-        // Default month: latest available intersection (prefer micromarket months)
         const mmLatest = mm.months?.[mm.months.length - 1];
         const locLatest = loc.months?.[loc.months.length - 1];
 
-        // If already selected, keep it
         setMetricMonth((prev) => {
           if (prev) return prev;
           return mmLatest || locLatest || "";
@@ -158,7 +158,7 @@ export default function MapView() {
   }, []);
 
   // -----------------------------
-  // Map init (unchanged)
+  // Map init
   // -----------------------------
   useEffect(() => {
     if (!containerRef.current) return;
@@ -178,11 +178,7 @@ export default function MapView() {
       pitch: 0,
       bearing: 0,
       antialias: true,
-      config: {
-        basemap: {
-          lightPreset,
-        },
-      },
+      config: { basemap: { lightPreset } },
     });
 
     mapRef.current = map;
@@ -196,7 +192,7 @@ export default function MapView() {
       map.addSource("roads-src", { type: "vector", url: vectorSources.roads });
       map.addSource("projects-src", { type: "vector", url: vectorSources.projects });
 
-      // Layers
+      // Visible layers
       map.addLayer({
         id: "city-outline",
         type: "line",
@@ -210,9 +206,7 @@ export default function MapView() {
         type: "fill",
         source: "micromarkets-src",
         "source-layer": TILESETS.micromarkets.sourceLayer,
-        paint: {
-          "fill-opacity": 0.08,
-        },
+        paint: { "fill-opacity": 0.08 },
       });
       map.addLayer({
         id: "micromarkets-outline",
@@ -227,9 +221,7 @@ export default function MapView() {
         type: "fill",
         source: "localities-src",
         "source-layer": TILESETS.localities.sourceLayer,
-        paint: {
-          "fill-opacity": 0.06,
-        },
+        paint: { "fill-opacity": 0.06 },
       });
       map.addLayer({
         id: "localities-outline",
@@ -253,6 +245,50 @@ export default function MapView() {
         source: "projects-src",
         "source-layer": TILESETS.projects.sourceLayer,
         paint: { "circle-radius": 3, "circle-opacity": 0.75 },
+      });
+
+      // -----------------------------
+      // HIT layers (transparent, on top)
+      // These make hover/click reliable for thin lines / small points / occluded polygons.
+      // -----------------------------
+      map.addLayer({
+        id: HIT_LAYERS.city,
+        type: "line",
+        source: "city-src",
+        "source-layer": TILESETS.city.sourceLayer,
+        paint: { "line-width": 12, "line-opacity": 0 },
+      });
+
+      map.addLayer({
+        id: HIT_LAYERS.micromarkets,
+        type: "fill",
+        source: "micromarkets-src",
+        "source-layer": TILESETS.micromarkets.sourceLayer,
+        paint: { "fill-color": "#000000", "fill-opacity": 0 },
+      });
+
+      map.addLayer({
+        id: HIT_LAYERS.localities,
+        type: "fill",
+        source: "localities-src",
+        "source-layer": TILESETS.localities.sourceLayer,
+        paint: { "fill-color": "#000000", "fill-opacity": 0 },
+      });
+
+      map.addLayer({
+        id: HIT_LAYERS.roads,
+        type: "line",
+        source: "roads-src",
+        "source-layer": TILESETS.roads.sourceLayer,
+        paint: { "line-width": 12, "line-opacity": 0 },
+      });
+
+      map.addLayer({
+        id: HIT_LAYERS.projects,
+        type: "circle",
+        source: "projects-src",
+        "source-layer": TILESETS.projects.sourceLayer,
+        paint: { "circle-radius": 10, "circle-opacity": 0 },
       });
 
       // Inspector handlers
@@ -316,23 +352,35 @@ export default function MapView() {
       mapRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [token, vectorSources]); // keep init stable
+  }, [token, vectorSources]);
 
   // -----------------------------
-  // Layer visibility toggles
+  // Layer visibility toggles (+ keep hit layers in sync)
   // -----------------------------
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
 
+    // Localities
     setLayerVisibility(map, "localities-fill", showLocalities);
     setLayerVisibility(map, "localities-outline", showLocalities);
+    setLayerVisibility(map, HIT_LAYERS.localities, showLocalities);
 
+    // Micromarkets
     setLayerVisibility(map, "micromarkets-fill", showMicromarkets);
     setLayerVisibility(map, "micromarkets-outline", showMicromarkets);
+    setLayerVisibility(map, HIT_LAYERS.micromarkets, showMicromarkets);
 
+    // Projects
     setLayerVisibility(map, "projects-circle", showProjects);
+    setLayerVisibility(map, HIT_LAYERS.projects, showProjects);
+
+    // Roads
     setLayerVisibility(map, "roads-line", showRoads);
+    setLayerVisibility(map, HIT_LAYERS.roads, showRoads);
+
+    // City hit always on (city outline always on)
+    setLayerVisibility(map, HIT_LAYERS.city, true);
   }, [showLocalities, showMicromarkets, showProjects, showRoads]);
 
   // -----------------------------
@@ -384,7 +432,7 @@ export default function MapView() {
   }, [enable3D]);
 
   // -----------------------------
-  // V1 Choropleth: paint config (once per relevant change)
+  // V1 Choropleth: paint config
   // -----------------------------
   useEffect(() => {
     const map = mapRef.current;
@@ -395,21 +443,18 @@ export default function MapView() {
 
     if (!map.getLayer(fillLayer)) return;
 
-    // If choropleth disabled, revert to subtle base
     if (!enableChoropleth) {
       map.setPaintProperty(fillLayer, "fill-color", "#888888");
       map.setPaintProperty(fillLayer, "fill-opacity", isMm ? 0.08 : 0.06);
       return;
     }
 
-    // Use feature-state "v" for value. Missing => -1
-    // Color ramp: simple interpolate. (Mapbox default colors are fine for V1.)
     const valueExpr: any = ["coalesce", ["feature-state", "v"], -1];
 
     map.setPaintProperty(fillLayer, "fill-color", [
       "case",
       ["<=", valueExpr, -1],
-      "#9CA3AF", // missing data gray
+      "#9CA3AF",
       [
         "interpolate",
         ["linear"],
@@ -437,7 +482,6 @@ export default function MapView() {
 
   // -----------------------------
   // V1 Choropleth: apply feature-state for visible features
-  // - We apply on: month change, level change, enable/disable, and map idle.
   // -----------------------------
   useEffect(() => {
     const map = mapRef.current;
@@ -464,9 +508,7 @@ export default function MapView() {
 
     if (!map.getSource(sourceId) || !map.getLayer(fillLayer)) return;
 
-    // Track legend stats only for current viewport features
     const computeLegendAndApply = () => {
-      // Query visible features from fill layer
       const features = map.queryRenderedFeatures({ layers: [fillLayer] }) as any[];
 
       let min = Number.POSITIVE_INFINITY;
@@ -474,13 +516,10 @@ export default function MapView() {
       let count = 0;
       let missing = 0;
 
-      // Optional: reduce work if huge.
-      // Still fine for Mumbai-level polygons.
       for (const f of features) {
         const fid = f?.id;
         if (fid === undefined || fid === null) continue;
 
-        // Join key
         let key = "";
         if (isMm) {
           key = String(fid);
@@ -511,24 +550,16 @@ export default function MapView() {
       });
     };
 
-    // Apply immediately + on idle to refresh after panning/zooming
     computeLegendAndApply();
 
-    const onIdle = () => {
-      // During continuous interactions, "idle" is lower frequency and stable.
-      computeLegendAndApply();
-    };
-
+    const onIdle = () => computeLegendAndApply();
     map.on("idle", onIdle);
     return () => {
       map.off("idle", onIdle);
     };
   }, [enableChoropleth, choroplethLevel, metricMonth, mmDoc, locDoc]);
 
-  // -----------------------------
-  // When level toggles, ensure that corresponding polygon layers are visible
-  // (helps avoid confusion when choropleth enabled)
-  // -----------------------------
+  // Ensure polygon layer visible when choropleth enabled
   useEffect(() => {
     if (!enableChoropleth) return;
     if (choroplethLevel === "micromarkets") {
@@ -539,16 +570,13 @@ export default function MapView() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [enableChoropleth, choroplethLevel]);
 
-  // -----------------------------
-  // Month options: prefer whichever level is selected
-  // -----------------------------
+  // Month options
   const monthOptions = useMemo(() => {
     const isMm = choroplethLevel === "micromarkets";
     const doc = isMm ? mmDoc : locDoc;
     return doc?.months ?? [];
   }, [choroplethLevel, mmDoc, locDoc]);
 
-  // If month not in options (e.g., switching level), choose latest available
   useEffect(() => {
     if (!monthOptions.length) return;
     if (!metricMonth || !monthOptions.includes(metricMonth)) {
@@ -620,23 +648,16 @@ export default function MapView() {
               </div>
               <div>
                 Range (psf):{" "}
-                <span style={{ fontWeight: 600 }}>
-                  {legend.min === null ? "-" : fmtMoney(legend.min)}{" "}
-                </span>
-                to{" "}
-                <span style={{ fontWeight: 600 }}>
-                  {legend.max === null ? "-" : fmtMoney(legend.max)}
-                </span>
+                <span style={{ fontWeight: 600 }}>{legend.min === null ? "-" : fmtMoney(legend.min)} </span>
+                to <span style={{ fontWeight: 600 }}>{legend.max === null ? "-" : fmtMoney(legend.max)}</span>
               </div>
               <div>
-                Viewport:{" "}
-                <span style={{ fontWeight: 600 }}>{legend.count}</span> colored,{" "}
+                Viewport: <span style={{ fontWeight: 600 }}>{legend.count}</span> colored,{" "}
                 <span style={{ fontWeight: 600 }}>{legend.missing}</span> missing
               </div>
             </div>
 
             <div style={{ marginTop: 8, display: "grid", gap: 6 }}>
-              {/* tiny swatches */}
               {[
                 { label: "Missing", color: "#9CA3AF" },
                 { label: "Low", color: "#E0F2FE" },
@@ -709,11 +730,7 @@ export default function MapView() {
           <div style={{ fontWeight: 600, marginBottom: 6 }}>Layer visibility</div>
 
           <label style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 6 }}>
-            <input
-              type="checkbox"
-              checked={showLocalities}
-              onChange={(e) => setShowLocalities(e.target.checked)}
-            />
+            <input type="checkbox" checked={showLocalities} onChange={(e) => setShowLocalities(e.target.checked)} />
             Localities
           </label>
 
@@ -727,11 +744,7 @@ export default function MapView() {
           </label>
 
           <label style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 6 }}>
-            <input
-              type="checkbox"
-              checked={showProjects}
-              onChange={(e) => setShowProjects(e.target.checked)}
-            />
+            <input type="checkbox" checked={showProjects} onChange={(e) => setShowProjects(e.target.checked)} />
             Projects
           </label>
 
@@ -771,6 +784,9 @@ export default function MapView() {
               <li>Projects: (later) can support point metrics similarly</li>
             </ul>
           </div>
+          <div style={{ marginTop: 8 }}>
+            Inspector hit-testing uses transparent hit layers (thicker lines / larger points) so hover/click works reliably.
+          </div>
         </div>
       </div>
     </div>
@@ -778,17 +794,18 @@ export default function MapView() {
 }
 
 function targetToLayerId(target: InspectTarget) {
+  // Use HIT layers so querying is reliable
   switch (target) {
     case "localities":
-      return "localities-fill";
+      return HIT_LAYERS.localities;
     case "micromarkets":
-      return "micromarkets-fill";
+      return HIT_LAYERS.micromarkets;
     case "projects":
-      return "projects-circle";
+      return HIT_LAYERS.projects;
     case "roads":
-      return "roads-line";
+      return HIT_LAYERS.roads;
     case "city":
-      return "city-outline";
+      return HIT_LAYERS.city;
   }
 }
 
