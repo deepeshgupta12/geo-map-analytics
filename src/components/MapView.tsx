@@ -53,12 +53,10 @@ const HIT_LAYERS = {
   projects: "projects-hit",
 } as const;
 
-// V2 highlight overlay layers (polygons only)
-const HIGHLIGHT = {
-  mmFill: "pinned-mm-fill",
-  mmLine: "pinned-mm-line",
-  locFill: "pinned-loc-fill",
-  locLine: "pinned-loc-line",
+// Pinned highlight layers (drawn from vector source with filters)
+const PIN_LAYERS = {
+  micromarkets: "pinned-mm-outline",
+  localities: "pinned-loc-outline",
 } as const;
 
 function safeJson(v: unknown) {
@@ -83,62 +81,6 @@ function parseMonthLabel(yyyyMm01: string) {
 function getStrProp(props: Record<string, unknown> | null | undefined, key: string): string {
   const v = props?.[key];
   return typeof v === "string" ? v : "";
-}
-
-function clamp(n: number, lo: number, hi: number) {
-  return Math.max(lo, Math.min(hi, n));
-}
-
-function percentile(sorted: number[], p: number) {
-  if (!sorted.length) return null;
-  const idx = (sorted.length - 1) * p;
-  const lo = Math.floor(idx);
-  const hi = Math.ceil(idx);
-  if (lo === hi) return sorted[lo];
-  const w = idx - lo;
-  return sorted[lo] * (1 - w) + sorted[hi] * w;
-}
-
-function bboxFromFeatures(features: any[]) {
-  let minLng = Number.POSITIVE_INFINITY;
-  let minLat = Number.POSITIVE_INFINITY;
-  let maxLng = Number.NEGATIVE_INFINITY;
-  let maxLat = Number.NEGATIVE_INFINITY;
-
-  const pushCoord = (lng: number, lat: number) => {
-    if (!Number.isFinite(lng) || !Number.isFinite(lat)) return;
-    minLng = Math.min(minLng, lng);
-    minLat = Math.min(minLat, lat);
-    maxLng = Math.max(maxLng, lng);
-    maxLat = Math.max(maxLat, lat);
-  };
-
-  for (const f of features) {
-    const g = f?.geometry;
-    if (!g) continue;
-
-    // Polygon: [ [ [lng,lat], ... ] , ... ]
-    // MultiPolygon: [ [ [ [lng,lat], ... ] , ... ] , ... ]
-    if (g.type === "Polygon") {
-      for (const ring of g.coordinates ?? []) {
-        for (const c of ring ?? []) pushCoord(c?.[0], c?.[1]);
-      }
-    } else if (g.type === "MultiPolygon") {
-      for (const poly of g.coordinates ?? []) {
-        for (const ring of poly ?? []) {
-          for (const c of ring ?? []) pushCoord(c?.[0], c?.[1]);
-        }
-      }
-    }
-  }
-
-  if (!Number.isFinite(minLng) || !Number.isFinite(minLat) || !Number.isFinite(maxLng) || !Number.isFinite(maxLat)) {
-    return null;
-  }
-  return [
-    [minLng, minLat] as [number, number],
-    [maxLng, maxLat] as [number, number],
-  ] as const;
 }
 
 export default function MapView() {
@@ -172,20 +114,35 @@ export default function MapView() {
   const [mmDoc, setMmDoc] = useState<MetricsDoc | null>(null);
   const [locDoc, setLocDoc] = useState<MetricsDoc | null>(null);
 
-  // Dynamic choropleth stops based on viewport (p20/p40/p60/p80)
-  const [dynStops, setDynStops] = useState<number[] | null>(null);
-
   // Legend stats
   const [legend, setLegend] = useState<{
     min: number | null;
     max: number | null;
     count: number;
     missing: number;
-    coveragePct: number | null;
-  }>({ min: null, max: null, count: 0, missing: 0, coveragePct: null });
+  }>({ min: null, max: null, count: 0, missing: 0 });
 
   // V2 pinned selection (only for micromarkets/localities polygons)
   const [pinned, setPinned] = useState<PinnedSelection | null>(null);
+
+  // -----------------------------
+  // V2.1 Step 1: Timeline + Play
+  // -----------------------------
+  const [isPlaying, setIsPlaying] = useState(false);
+  const isPlayingRef = useRef(false);
+  useEffect(() => {
+    isPlayingRef.current = isPlaying;
+  }, [isPlaying]);
+
+  const [loopPlay, setLoopPlay] = useState(true);
+
+  type PlaySpeed = "slow" | "normal" | "fast";
+  const [playSpeed, setPlaySpeed] = useState<PlaySpeed>("normal");
+  const playSpeedMs = useMemo(() => {
+    if (playSpeed === "slow") return 1200;
+    if (playSpeed === "fast") return 450;
+    return 800; // normal
+  }, [playSpeed]);
 
   const token = process.env.NEXT_PUBLIC_MAPBOX_TOKEN;
 
@@ -240,6 +197,70 @@ export default function MapView() {
       cancelled = true;
     };
   }, []);
+
+  // Month options depend on selected level
+  const monthOptions = useMemo(() => {
+    const isMm = choroplethLevel === "micromarkets";
+    const doc = isMm ? mmDoc : locDoc;
+    return doc?.months ?? [];
+  }, [choroplethLevel, mmDoc, locDoc]);
+
+  // Keep metricMonth valid on level switch / doc load
+  useEffect(() => {
+    if (!monthOptions.length) return;
+    if (!metricMonth || !monthOptions.includes(metricMonth)) {
+      setMetricMonth(monthOptions[monthOptions.length - 1]);
+    }
+  }, [monthOptions, metricMonth]);
+
+  // Derived index for slider
+  const metricMonthIndex = useMemo(() => {
+    if (!monthOptions.length) return 0;
+    const idx = monthOptions.indexOf(metricMonth);
+    return idx >= 0 ? idx : monthOptions.length - 1;
+  }, [monthOptions, metricMonth]);
+
+  // Playback loop: advances metricMonth periodically
+  useEffect(() => {
+    if (!isPlaying) return;
+    if (!enableChoropleth) {
+      setIsPlaying(false);
+      return;
+    }
+    if (monthOptions.length < 2) {
+      setIsPlaying(false);
+      return;
+    }
+
+    const id = window.setInterval(() => {
+      setMetricMonth((prev) => {
+        const curIdx = monthOptions.indexOf(prev);
+        const safeIdx = curIdx >= 0 ? curIdx : 0;
+        let nextIdx = safeIdx + 1;
+
+        if (nextIdx >= monthOptions.length) {
+          if (!loopPlay) {
+            // stop at end (keep last month selected)
+            window.clearInterval(id);
+            setIsPlaying(false);
+            return monthOptions[monthOptions.length - 1];
+          }
+          nextIdx = 0; // loop
+        }
+
+        return monthOptions[nextIdx];
+      });
+    }, playSpeedMs);
+
+    return () => {
+      window.clearInterval(id);
+    };
+  }, [isPlaying, monthOptions, playSpeedMs, loopPlay, enableChoropleth]);
+
+  // Utility: stop playback (used by map interaction handlers + UI)
+  const stopPlayback = () => {
+    if (isPlayingRef.current) setIsPlaying(false);
+  };
 
   // -----------------------------
   // Map init
@@ -375,43 +396,41 @@ export default function MapView() {
       });
 
       // -----------------------------
-      // V2 pinned highlight overlays (full polygon via vector filter)
+      // Pinned highlight layers (full polygon outline via filter)
       // -----------------------------
       map.addLayer({
-        id: HIGHLIGHT.mmFill,
-        type: "fill",
-        source: "micromarkets-src",
-        "source-layer": TILESETS.micromarkets.sourceLayer,
-        paint: { "fill-color": "#F59E0B", "fill-opacity": 0.12 },
-        filter: ["==", ["id"], "__none__"],
-      });
-
-      map.addLayer({
-        id: HIGHLIGHT.mmLine,
+        id: PIN_LAYERS.micromarkets,
         type: "line",
         source: "micromarkets-src",
         "source-layer": TILESETS.micromarkets.sourceLayer,
-        paint: { "line-color": "#F59E0B", "line-width": 3 },
-        filter: ["==", ["id"], "__none__"],
+        filter: ["==", ["id"], -999999], // updated at runtime
+        paint: {
+          "line-color": "#F59E0B",
+          "line-width": 3,
+        },
       });
 
       map.addLayer({
-        id: HIGHLIGHT.locFill,
-        type: "fill",
-        source: "localities-src",
-        "source-layer": TILESETS.localities.sourceLayer,
-        paint: { "fill-color": "#F59E0B", "fill-opacity": 0.12 },
-        filter: ["==", ["get", "LocalityName"], "__none__"],
-      });
-
-      map.addLayer({
-        id: HIGHLIGHT.locLine,
+        id: PIN_LAYERS.localities,
         type: "line",
         source: "localities-src",
         "source-layer": TILESETS.localities.sourceLayer,
-        paint: { "line-color": "#F59E0B", "line-width": 3 },
-        filter: ["==", ["get", "LocalityName"], "__none__"],
+        filter: ["==", ["get", "LocalityName"], "__nope__"], // updated at runtime
+        paint: {
+          "line-color": "#F59E0B",
+          "line-width": 3,
+        },
       });
+
+      // Stop playback on map interactions (user intent)
+      const stop = () => stopPlayback();
+      map.on("dragstart", stop);
+      map.on("zoomstart", stop);
+      map.on("rotatestart", stop);
+      map.on("pitchstart", stop);
+      map.on("movestart", stop);
+      map.on("mousedown", stop);
+      map.on("touchstart", stop);
 
       // Inspector handlers
       const onMove = (e: MapMouseEvent) => {
@@ -442,6 +461,8 @@ export default function MapView() {
       };
 
       const onClick = (e: MapMouseEvent) => {
+        stopPlayback();
+
         const m = mapRef.current;
         if (!m) return;
 
@@ -498,6 +519,29 @@ export default function MapView() {
 
       map.on("mousemove", onMove);
       map.on("click", onClick);
+
+      // ESC clears pinned (and stops playback)
+      const onKeyDown = (ev: KeyboardEvent) => {
+        if (ev.key === "Escape") {
+          stopPlayback();
+          setPinned(null);
+        }
+      };
+      window.addEventListener("keydown", onKeyDown);
+
+      // Cleanup listeners when map removed
+      map.once("remove", () => {
+        window.removeEventListener("keydown", onKeyDown);
+        map.off("dragstart", stop);
+        map.off("zoomstart", stop);
+        map.off("rotatestart", stop);
+        map.off("pitchstart", stop);
+        map.off("movestart", stop);
+        map.off("mousedown", stop);
+        map.off("touchstart", stop);
+        map.off("mousemove", onMove);
+        map.off("click", onClick);
+      });
     });
 
     return () => {
@@ -508,15 +552,30 @@ export default function MapView() {
   }, [token, vectorSources]);
 
   // -----------------------------
-  // ESC to clear pinned
+  // Keep pinned highlight filters in sync
   // -----------------------------
   useEffect(() => {
-    const onKey = (ev: KeyboardEvent) => {
-      if (ev.key === "Escape") setPinned(null);
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, []);
+    const map = mapRef.current;
+    if (!map) return;
+
+    if (!map.getLayer(PIN_LAYERS.micromarkets) || !map.getLayer(PIN_LAYERS.localities)) return;
+
+    if (!pinned) {
+      // reset filters to match nothing
+      map.setFilter(PIN_LAYERS.micromarkets, ["==", ["id"], -999999]);
+      map.setFilter(PIN_LAYERS.localities, ["==", ["get", "LocalityName"], "__nope__"]);
+      return;
+    }
+
+    if (pinned.level === "micromarkets") {
+      const fidNum = Number(pinned.featureId);
+      map.setFilter(PIN_LAYERS.micromarkets, ["==", ["id"], Number.isFinite(fidNum) ? fidNum : -999999]);
+      map.setFilter(PIN_LAYERS.localities, ["==", ["get", "LocalityName"], "__nope__"]);
+    } else {
+      map.setFilter(PIN_LAYERS.micromarkets, ["==", ["id"], -999999]);
+      map.setFilter(PIN_LAYERS.localities, ["==", ["get", "LocalityName"], pinned.joinKey || "__nope__"]);
+    }
+  }, [pinned]);
 
   // -----------------------------
   // Layer visibility toggles (+ keep hit layers in sync)
@@ -529,11 +588,13 @@ export default function MapView() {
     setLayerVisibility(map, "localities-fill", showLocalities);
     setLayerVisibility(map, "localities-outline", showLocalities);
     setLayerVisibility(map, HIT_LAYERS.localities, showLocalities);
+    setLayerVisibility(map, PIN_LAYERS.localities, showLocalities); // pinned outline
 
     // Micromarkets
     setLayerVisibility(map, "micromarkets-fill", showMicromarkets);
     setLayerVisibility(map, "micromarkets-outline", showMicromarkets);
     setLayerVisibility(map, HIT_LAYERS.micromarkets, showMicromarkets);
+    setLayerVisibility(map, PIN_LAYERS.micromarkets, showMicromarkets); // pinned outline
 
     // Projects
     setLayerVisibility(map, "projects-circle", showProjects);
@@ -545,12 +606,6 @@ export default function MapView() {
 
     // City hit always on (city outline always on)
     setLayerVisibility(map, HIT_LAYERS.city, true);
-
-    // Highlight overlay should respect layer visibility
-    setLayerVisibility(map, HIGHLIGHT.mmFill, showMicromarkets);
-    setLayerVisibility(map, HIGHLIGHT.mmLine, showMicromarkets);
-    setLayerVisibility(map, HIGHLIGHT.locFill, showLocalities);
-    setLayerVisibility(map, HIGHLIGHT.locLine, showLocalities);
   }, [showLocalities, showMicromarkets, showProjects, showRoads]);
 
   // -----------------------------
@@ -602,62 +657,7 @@ export default function MapView() {
   }, [enable3D]);
 
   // -----------------------------
-  // V2 pinned highlight: set filters + zoom-to
-  // -----------------------------
-  useEffect(() => {
-    const map = mapRef.current;
-    if (!map) return;
-    if (!map.isStyleLoaded()) return;
-
-    // reset highlight filters
-    if (!pinned) {
-      if (map.getLayer(HIGHLIGHT.mmFill)) map.setFilter(HIGHLIGHT.mmFill, ["==", ["id"], "__none__"]);
-      if (map.getLayer(HIGHLIGHT.mmLine)) map.setFilter(HIGHLIGHT.mmLine, ["==", ["id"], "__none__"]);
-      if (map.getLayer(HIGHLIGHT.locFill)) map.setFilter(HIGHLIGHT.locFill, ["==", ["get", "LocalityName"], "__none__"]);
-      if (map.getLayer(HIGHLIGHT.locLine)) map.setFilter(HIGHLIGHT.locLine, ["==", ["get", "LocalityName"], "__none__"]);
-      return;
-    }
-
-    if (pinned.level === "micromarkets") {
-      // show mm highlight only
-      if (map.getLayer(HIGHLIGHT.mmFill)) map.setFilter(HIGHLIGHT.mmFill, ["==", ["id"], pinned.featureId as any]);
-      if (map.getLayer(HIGHLIGHT.mmLine)) map.setFilter(HIGHLIGHT.mmLine, ["==", ["id"], pinned.featureId as any]);
-      if (map.getLayer(HIGHLIGHT.locFill)) map.setFilter(HIGHLIGHT.locFill, ["==", ["get", "LocalityName"], "__none__"]);
-      if (map.getLayer(HIGHLIGHT.locLine)) map.setFilter(HIGHLIGHT.locLine, ["==", ["get", "LocalityName"], "__none__"]);
-    } else {
-      // show locality highlight only
-      if (map.getLayer(HIGHLIGHT.locFill)) map.setFilter(HIGHLIGHT.locFill, ["==", ["get", "LocalityName"], pinned.joinKey]);
-      if (map.getLayer(HIGHLIGHT.locLine)) map.setFilter(HIGHLIGHT.locLine, ["==", ["get", "LocalityName"], pinned.joinKey]);
-      if (map.getLayer(HIGHLIGHT.mmFill)) map.setFilter(HIGHLIGHT.mmFill, ["==", ["id"], "__none__"]);
-      if (map.getLayer(HIGHLIGHT.mmLine)) map.setFilter(HIGHLIGHT.mmLine, ["==", ["id"], "__none__"]);
-    }
-
-    // zoom-to after render settles (idle)
-    const layerForBbox = pinned.level === "micromarkets" ? HIGHLIGHT.mmFill : HIGHLIGHT.locFill;
-
-    const onIdle = () => {
-      try {
-        const feats = map.queryRenderedFeatures({ layers: [layerForBbox] }) as any[];
-        const bb = bboxFromFeatures(feats);
-        if (bb) {
-          map.fitBounds(bb, { padding: 60, duration: 450 });
-        } else {
-          // fallback: small easeTo using click lngLat
-          map.easeTo({ center: [pinned.lngLat.lng, pinned.lngLat.lat], duration: 350, zoom: Math.max(map.getZoom(), 11) });
-        }
-      } catch {
-        // ignore
-      }
-    };
-
-    map.once("idle", onIdle);
-    return () => {
-      // once() cleans itself
-    };
-  }, [pinned]);
-
-  // -----------------------------
-  // V1 Choropleth: paint config (uses dynStops if available)
+  // V1 Choropleth: paint config
   // -----------------------------
   useEffect(() => {
     const map = mapRef.current;
@@ -676,8 +676,6 @@ export default function MapView() {
 
     const valueExpr: any = ["coalesce", ["feature-state", "v"], -1];
 
-    const stops = dynStops && dynStops.length === 4 ? dynStops : [5000, 15000, 25000, 35000];
-
     map.setPaintProperty(fillLayer, "fill-color", [
       "case",
       ["<=", valueExpr, -1],
@@ -686,15 +684,15 @@ export default function MapView() {
         "interpolate",
         ["linear"],
         valueExpr,
-        stops[0],
+        5000,
         "#E0F2FE",
-        stops[1],
+        15000,
         "#93C5FD",
-        stops[2],
+        25000,
         "#60A5FA",
-        stops[3],
+        35000,
         "#3B82F6",
-        Math.max(stops[3] + 1, stops[3] * 1.2),
+        50000,
         "#1D4ED8",
       ],
     ]);
@@ -705,18 +703,17 @@ export default function MapView() {
       0.04,
       isMm ? 0.28 : 0.24,
     ]);
-  }, [enableChoropleth, choroplethLevel, dynStops]);
+  }, [enableChoropleth, choroplethLevel]);
 
   // -----------------------------
-  // V1 Choropleth: apply feature-state for visible features + compute legend + dynStops
+  // V1 Choropleth: apply feature-state for visible features
   // -----------------------------
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
 
     if (!enableChoropleth) {
-      setLegend({ min: null, max: null, count: 0, missing: 0, coveragePct: null });
-      setDynStops(null);
+      setLegend({ min: null, max: null, count: 0, missing: 0 });
       return;
     }
 
@@ -744,8 +741,6 @@ export default function MapView() {
       let count = 0;
       let missing = 0;
 
-      const values: number[] = [];
-
       for (const f of features) {
         const fid = f?.id;
         if (fid === undefined || fid === null) continue;
@@ -763,7 +758,6 @@ export default function MapView() {
 
         if (typeof v === "number" && Number.isFinite(v)) {
           count += 1;
-          values.push(v);
           min = Math.min(min, v);
           max = Math.max(max, v);
           map.setFeatureState({ source: sourceId, sourceLayer, id: fid }, { v, n: bucket?.n ?? null });
@@ -773,44 +767,12 @@ export default function MapView() {
         }
       }
 
-      // Legend coverage
-      const total = count + missing;
-      const coveragePct = total > 0 ? Math.round((count / total) * 100) : null;
-
       setLegend({
         min: count > 0 ? min : null,
         max: count > 0 ? max : null,
         count,
         missing,
-        coveragePct,
       });
-
-      // Dynamic stops from viewport percentiles
-      if (values.length >= 8) {
-        values.sort((a, b) => a - b);
-        const p20 = percentile(values, 0.2);
-        const p40 = percentile(values, 0.4);
-        const p60 = percentile(values, 0.6);
-        const p80 = percentile(values, 0.8);
-
-        if (
-          typeof p20 === "number" &&
-          typeof p40 === "number" &&
-          typeof p60 === "number" &&
-          typeof p80 === "number"
-        ) {
-          // ensure increasing
-          const s0 = Math.max(1, p20);
-          const s1 = Math.max(s0 + 1, p40);
-          const s2 = Math.max(s1 + 1, p60);
-          const s3 = Math.max(s2 + 1, p80);
-          setDynStops([s0, s1, s2, s3]);
-        } else {
-          setDynStops(null);
-        }
-      } else {
-        setDynStops(null);
-      }
     };
 
     computeLegendAndApply();
@@ -832,20 +794,6 @@ export default function MapView() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [enableChoropleth, choroplethLevel]);
-
-  // Month options
-  const monthOptions = useMemo(() => {
-    const isMm = choroplethLevel === "micromarkets";
-    const doc = isMm ? mmDoc : locDoc;
-    return doc?.months ?? [];
-  }, [choroplethLevel, mmDoc, locDoc]);
-
-  useEffect(() => {
-    if (!monthOptions.length) return;
-    if (!metricMonth || !monthOptions.includes(metricMonth)) {
-      setMetricMonth(monthOptions[monthOptions.length - 1]);
-    }
-  }, [monthOptions, metricMonth]);
 
   // -----------------------------
   // V2 pinned details computed values
@@ -891,7 +839,10 @@ export default function MapView() {
             <input
               type="checkbox"
               checked={enableChoropleth}
-              onChange={(e) => setEnableChoropleth(e.target.checked)}
+              onChange={(e) => {
+                stopPlayback();
+                setEnableChoropleth(e.target.checked);
+              }}
             />
             Enable choropleth (asking_psf)
           </label>
@@ -901,7 +852,10 @@ export default function MapView() {
               <div style={{ fontSize: 12, opacity: 0.85, marginBottom: 4 }}>Level</div>
               <select
                 value={choroplethLevel}
-                onChange={(e) => setChoroplethLevel(e.target.value as ChoroplethLevel)}
+                onChange={(e) => {
+                  stopPlayback();
+                  setChoroplethLevel(e.target.value as ChoroplethLevel);
+                }}
                 style={{ width: "100%", padding: 8 }}
                 disabled={!enableChoropleth}
               >
@@ -914,7 +868,10 @@ export default function MapView() {
               <div style={{ fontSize: 12, opacity: 0.85, marginBottom: 4 }}>Month</div>
               <select
                 value={metricMonth}
-                onChange={(e) => setMetricMonth(e.target.value)}
+                onChange={(e) => {
+                  stopPlayback();
+                  setMetricMonth(e.target.value);
+                }}
                 style={{ width: "100%", padding: 8 }}
                 disabled={!enableChoropleth || monthOptions.length === 0}
               >
@@ -928,6 +885,85 @@ export default function MapView() {
                   ))
                 )}
               </select>
+            </div>
+
+            {/* V2.1 Step 1: Timeline slider + Play */}
+            <div style={{ padding: 10, border: "1px solid #e5e7eb", borderRadius: 8 }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+                <div style={{ fontSize: 12, opacity: 0.85 }}>Timeline</div>
+                <div style={{ fontSize: 12, fontWeight: 600 }}>
+                  {metricMonth ? parseMonthLabel(metricMonth) : "-"}
+                </div>
+              </div>
+
+              <div style={{ marginTop: 8 }}>
+                <input
+                  type="range"
+                  min={0}
+                  max={Math.max(0, monthOptions.length - 1)}
+                  step={1}
+                  value={metricMonthIndex}
+                  onChange={(e) => {
+                    stopPlayback();
+                    const idx = Number(e.target.value);
+                    const next = monthOptions[idx];
+                    if (next) setMetricMonth(next);
+                  }}
+                  disabled={!enableChoropleth || monthOptions.length === 0}
+                  style={{ width: "100%" }}
+                />
+              </div>
+
+              <div style={{ marginTop: 10, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                <button
+                  onClick={() => {
+                    if (!enableChoropleth) return;
+                    if (!monthOptions.length) return;
+                    setIsPlaying((p) => !p);
+                  }}
+                  disabled={!enableChoropleth || monthOptions.length < 2}
+                  style={{
+                    fontSize: 12,
+                    padding: "8px 10px",
+                    border: "1px solid #e5e7eb",
+                    borderRadius: 8,
+                    background: "white",
+                    cursor: !enableChoropleth || monthOptions.length < 2 ? "not-allowed" : "pointer",
+                  }}
+                  title={monthOptions.length < 2 ? "Not enough months to play" : isPlaying ? "Pause" : "Play"}
+                >
+                  {isPlaying ? "Pause" : "Play"}
+                </button>
+
+                <select
+                  value={playSpeed}
+                  onChange={(e) => {
+                    stopPlayback();
+                    setPlaySpeed(e.target.value as PlaySpeed);
+                  }}
+                  disabled={!enableChoropleth || monthOptions.length < 2}
+                  style={{ width: "100%", padding: 8, fontSize: 12 }}
+                  title="Playback speed"
+                >
+                  <option value="slow">Speed: Slow</option>
+                  <option value="normal">Speed: Normal</option>
+                  <option value="fast">Speed: Fast</option>
+                </select>
+              </div>
+
+              <label style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 10, fontSize: 12 }}>
+                <input
+                  type="checkbox"
+                  checked={loopPlay}
+                  onChange={(e) => setLoopPlay(e.target.checked)}
+                  disabled={!enableChoropleth || monthOptions.length < 2}
+                />
+                Loop playback
+              </label>
+
+              <div style={{ marginTop: 8, fontSize: 12, opacity: 0.7 }}>
+                Playback stops on map interaction (drag/zoom/click) or manual month change.
+              </div>
             </div>
           </div>
 
@@ -946,21 +982,7 @@ export default function MapView() {
               <div>
                 Viewport: <span style={{ fontWeight: 600 }}>{legend.count}</span> colored,{" "}
                 <span style={{ fontWeight: 600 }}>{legend.missing}</span> missing
-                {typeof legend.coveragePct === "number" ? (
-                  <>
-                    {" "}
-                    (<span style={{ fontWeight: 600 }}>{legend.coveragePct}%</span> coverage)
-                  </>
-                ) : null}
               </div>
-              {dynStops && dynStops.length === 4 ? (
-                <div style={{ opacity: 0.85 }}>
-                  Scale (viewport): p20 {fmtMoney(dynStops[0])}, p40 {fmtMoney(dynStops[1])}, p60 {fmtMoney(dynStops[2])}, p80{" "}
-                  {fmtMoney(dynStops[3])}
-                </div>
-              ) : (
-                <div style={{ opacity: 0.75 }}>Scale: fallback thresholds (insufficient viewport samples)</div>
-              )}
             </div>
 
             <div style={{ marginTop: 8, display: "grid", gap: 6 }}>
@@ -993,7 +1015,10 @@ export default function MapView() {
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
               <div style={{ fontWeight: 600 }}>Pinned (click a Micromarket/Locality polygon)</div>
               <button
-                onClick={() => setPinned(null)}
+                onClick={() => {
+                  stopPlayback();
+                  setPinned(null);
+                }}
                 style={{
                   fontSize: 12,
                   padding: "6px 8px",
@@ -1011,7 +1036,7 @@ export default function MapView() {
 
             {!pinned ? (
               <div style={{ fontSize: 12, opacity: 0.75, marginTop: 6 }}>
-                Tip: set Inspect target to Micromarkets or Localities, then click a polygon. Press ESC to clear.
+                Tip: set Inspect target to Micromarkets or Localities, then click a polygon.
               </div>
             ) : (
               <div style={{ marginTop: 8, fontSize: 12, opacity: 0.92, display: "grid", gap: 6 }}>
@@ -1030,10 +1055,13 @@ export default function MapView() {
                 <div>
                   Month value (psf):{" "}
                   <span style={{ fontWeight: 600 }}>
-                    {pinnedCurrent?.v !== undefined && typeof pinnedCurrent?.v === "number" ? fmtMoney(pinnedCurrent.v) : "-"}
+                    {pinnedCurrent?.v !== undefined && typeof pinnedCurrent?.v === "number"
+                      ? fmtMoney(pinnedCurrent.v)
+                      : "-"}
                   </span>{" "}
                   <span style={{ opacity: 0.85 }}>
-                    (n: {pinnedCurrent?.n !== undefined && typeof pinnedCurrent?.n === "number" ? pinnedCurrent.n : "-"})
+                    (n:{" "}
+                    {pinnedCurrent?.n !== undefined && typeof pinnedCurrent?.n === "number" ? pinnedCurrent.n : "-"})
                   </span>
                 </div>
 
@@ -1046,10 +1074,14 @@ export default function MapView() {
                           <th style={{ textAlign: "left", padding: "8px 10px", borderBottom: "1px solid #e5e7eb" }}>
                             Month
                           </th>
-                          <th style={{ textAlign: "right", padding: "8px 10px", borderBottom: "1px solid #e5e7eb" }}>
+                          <th
+                            style={{ textAlign: "right", padding: "8px 10px", borderBottom: "1px solid #e5e7eb" }}
+                          >
                             psf
                           </th>
-                          <th style={{ textAlign: "right", padding: "8px 10px", borderBottom: "1px solid #e5e7eb" }}>
+                          <th
+                            style={{ textAlign: "right", padding: "8px 10px", borderBottom: "1px solid #e5e7eb" }}
+                          >
                             n
                           </th>
                         </tr>
@@ -1132,6 +1164,7 @@ export default function MapView() {
           <select
             value={inspectTarget}
             onChange={(e) => {
+              stopPlayback();
               setHoverInfo(null);
               setClickInfo(null);
               setInspectTarget(e.target.value as InspectTarget);
@@ -1205,11 +1238,12 @@ export default function MapView() {
               <li>
                 Localities: join by <code>properties.LocalityName</code> (matches JSON keys)
               </li>
-              <li>Projects: later can support point metrics similarly</li>
+              <li>Projects: (later) can support point metrics similarly</li>
             </ul>
           </div>
           <div style={{ marginTop: 8 }}>
-            Inspector hit-testing uses transparent hit layers (thicker lines / larger points) so hover/click works reliably.
+            Inspector hit-testing uses transparent hit layers (thicker lines / larger points) so hover/click works
+            reliably.
           </div>
         </div>
       </div>
