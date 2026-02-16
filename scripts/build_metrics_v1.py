@@ -24,15 +24,18 @@ def weighted_avg(group: pd.DataFrame, value_col: str, weight_col: str) -> float 
         return None
     w = g[weight_col].clip(lower=0)
     if w.sum() == 0:
-        # fallback to simple mean if weights missing
         return float(g[value_col].mean())
     return float((g[value_col] * w).sum() / w.sum())
 
 
 def month_key(dt) -> str:
-    # normalize to YYYY-MM-01 string
     ts = pd.to_datetime(dt)
     return ts.strftime("%Y-%m-01")
+
+
+def _coerce_int_series(s: pd.Series) -> pd.Series:
+    # Keeps pandas nullable Int64 (so NaNs are preserved)
+    return pd.to_numeric(s, errors="coerce").astype("Int64")
 
 
 def main() -> None:
@@ -43,19 +46,35 @@ def main() -> None:
     if not DIM_LOCALITY_FILE.exists():
         raise FileNotFoundError(f"Missing dim_locality file: {DIM_LOCALITY_FILE}")
 
+    # ----------------------------
+    # Load + clean dim_locality
+    # ----------------------------
     dim_loc = pd.read_csv(DIM_LOCALITY_FILE, encoding="cp1252")
+
     # expected columns: LocalityID, MicroMarketID, CityID, LocalityName, Pincode
+    for col in ["CityID", "LocalityID", "MicroMarketID"]:
+        if col in dim_loc.columns:
+            dim_loc[col] = _coerce_int_series(dim_loc[col])
+
     dim_loc = dim_loc[dim_loc["CityID"] == CITY_ID].copy()
 
+    # A little hygiene: keep the first occurrence per LocalityID
+    dim_loc = dim_loc.dropna(subset=["LocalityID", "LocalityName"])
+    dim_loc = dim_loc.drop_duplicates(subset=["LocalityID"], keep="first")
+
+    # ----------------------------
+    # Load + clean asking sheet
+    # ----------------------------
     asking = pd.read_excel(ASKING_FILE, sheet_name=0)
-    # expected columns:
-    # Month, CityID, MicroMarketID, LocalityID, BHK, AssetType, MedianAskingPrice, MedianPricePSF, SampleSize, FreshnessDate
+
+    for col in ["CityID", "LocalityID", "MicroMarketID"]:
+        if col in asking.columns:
+            asking[col] = _coerce_int_series(asking[col])
+
     asking = asking[asking["CityID"] == CITY_ID].copy()
 
-    # ---- Choose V1 metric definition (simple + explicit) ----
-    # We start with: Apartment + all BHK combined (weighted by SampleSize), using MedianPricePSF.
+    # V1 metric definition: Apartment, all BHK combined, MedianPricePSF weighted by SampleSize
     asking = asking[asking["AssetType"].astype(str).str.lower() == "apartment"].copy()
-
     asking["MonthKey"] = asking["Month"].apply(month_key)
 
     # ----------------------------
@@ -63,6 +82,8 @@ def main() -> None:
     # ----------------------------
     mm_rows = []
     for (mkey, mmid), grp in asking.groupby(["MonthKey", "MicroMarketID"], dropna=False):
+        if pd.isna(mmid):
+            continue
         v = weighted_avg(grp, "MedianPricePSF", "SampleSize")
         sample = int(pd.to_numeric(grp["SampleSize"], errors="coerce").fillna(0).sum())
         if v is None:
@@ -93,7 +114,7 @@ def main() -> None:
     # -----------------------------------------
     # 2) LocalityName metric file (lookup join)
     # -----------------------------------------
-    # Join LocalityID -> LocalityName via dim_locality
+    # Join LocalityID -> LocalityName using dim_locality
     asking_loc = asking.merge(
         dim_loc[["LocalityID", "LocalityName"]],
         how="left",
@@ -101,10 +122,58 @@ def main() -> None:
         validate="m:1",
     )
 
-    missing_names = int(asking_loc["LocalityName"].isna().sum())
-    if missing_names > 0:
-        print(f"[warn] {missing_names} asking rows could not map LocalityID -> LocalityName for CityID={CITY_ID}")
+    # Export unmapped rows BEFORE dropping them
+    unmapped = asking_loc[asking_loc["LocalityName"].isna()].copy()
+    unmapped_count = int(unmapped.shape[0])
 
+    if unmapped_count > 0:
+        # Aggregate for quick diagnosis
+        summary = (
+            unmapped.groupby("LocalityID", dropna=False)
+            .size()
+            .reset_index(name="rows")
+            .sort_values("rows", ascending=False)
+        )
+
+        # Build a compact JSON artifact with examples
+        examples = []
+        # show up to 50 unmapped rows as examples (enough for debugging)
+        sample_rows = unmapped.head(50)
+        for _, r in sample_rows.iterrows():
+            examples.append(
+                {
+                    "MonthKey": str(r.get("MonthKey")),
+                    "LocalityID": None if pd.isna(r.get("LocalityID")) else int(r.get("LocalityID")),
+                    "MicroMarketID": None if pd.isna(r.get("MicroMarketID")) else int(r.get("MicroMarketID")),
+                    "MedianPricePSF": None if pd.isna(r.get("MedianPricePSF")) else float(r.get("MedianPricePSF")),
+                    "SampleSize": None if pd.isna(r.get("SampleSize")) else int(pd.to_numeric(r.get("SampleSize"), errors="coerce") or 0),
+                    "FreshnessDate": str(r.get("FreshnessDate")) if "FreshnessDate" in unmapped.columns else None,
+                }
+            )
+
+        unmapped_out = {
+            "cityId": CITY_ID,
+            "reason": "LocalityID not found in dim_locality.csv (after dtype normalization)",
+            "unmappedRowCount": unmapped_count,
+            "uniqueUnmappedLocalityIdCount": int(summary["LocalityID"].notna().sum()),
+            "topUnmappedLocalityIds": [
+                {
+                    "LocalityID": None if pd.isna(row["LocalityID"]) else int(row["LocalityID"]),
+                    "rows": int(row["rows"]),
+                }
+                for _, row in summary.head(50).iterrows()
+            ],
+            "examples": examples,
+        }
+
+        unmapped_path = OUT / "unmapped_locality_ids_city13.json"
+        unmapped_path.write_text(json.dumps(unmapped_out, indent=2))
+        print(f"[warn] {unmapped_count} asking rows could not map LocalityID -> LocalityName for CityID={CITY_ID}")
+        print(f"Wrote: {unmapped_path}")
+    else:
+        print("All asking rows mapped LocalityID -> LocalityName successfully (CityID=13).")
+
+    # Now drop unmapped rows for the localityName metric output
     asking_loc = asking_loc.dropna(subset=["LocalityName"]).copy()
 
     loc_rows = []
@@ -127,6 +196,7 @@ def main() -> None:
         "notes": [
             "Joined LocalityID -> LocalityName using dim_locality.csv",
             "If multiple LocalityID share same LocalityName within a city, values are aggregated into one bucket",
+            "Locality tiles do not expose LocalityID, so runtime join should use (CityID + LocalityName) from tiles",
         ],
     }
 

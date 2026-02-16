@@ -6020,6 +6020,7 @@
   },
   "notes": [
     "Joined LocalityID -> LocalityName using dim_locality.csv",
-    "If multiple LocalityID share same LocalityName within a city, values are aggregated into one bucket"
+    "If multiple LocalityID share same LocalityName within a city, values are aggregated into one bucket",
+    "Locality tiles do not expose LocalityID, so runtime join should use (CityID + LocalityName) from tiles"
   ]
 }

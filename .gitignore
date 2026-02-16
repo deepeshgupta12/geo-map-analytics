@@ -39,3 +39,13 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# ---- geo-map-analytics: raw datasets (keep local only) ----
+/data/raw/
+/data/raw/**
+*.xlsx
+*.xls
+*.xlsm
+*.csv
+!src/**.csv
+!public/**.csv

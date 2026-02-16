@@ -1,0 +1,82 @@
+{
+  "cityId": 13,
+  "reason": "LocalityID not found in dim_locality.csv (after dtype normalization)",
+  "unmappedRowCount": 8,
+  "uniqueUnmappedLocalityIdCount": 2,
+  "topUnmappedLocalityIds": [
+    {
+      "LocalityID": 16583,
+      "rows": 7
+    },
+    {
+      "LocalityID": 16582,
+      "rows": 1
+    }
+  ],
+  "examples": [
+    {
+      "MonthKey": "2025-03-01",
+      "LocalityID": 16583,
+      "MicroMarketID": 271,
+      "MedianPricePSF": 30529.172320217,
+      "SampleSize": 1,
+      "FreshnessDate": "2025-03-30 01:38:37"
+    },
+    {
+      "MonthKey": "2025-04-01",
+      "LocalityID": 16583,
+      "MicroMarketID": 271,
+      "MedianPricePSF": 28344.671201814,
+      "SampleSize": 2,
+      "FreshnessDate": "2025-04-25 00:27:33"
+    },
+    {
+      "MonthKey": "2025-04-01",
+      "LocalityID": 16583,
+      "MicroMarketID": 271,
+      "MedianPricePSF": 26250.0,
+      "SampleSize": 1,
+      "FreshnessDate": "2025-04-06 12:25:00"
+    },
+    {
+      "MonthKey": "2025-04-01",
+      "LocalityID": 16583,
+      "MicroMarketID": 271,
+      "MedianPricePSF": 22471.9101123595,
+      "SampleSize": 1,
+      "FreshnessDate": "2025-04-06 12:07:33"
+    },
+    {
+      "MonthKey": "2025-08-01",
+      "LocalityID": 16582,
+      "MicroMarketID": 100,
+      "MedianPricePSF": 0.0,
+      "SampleSize": 1,
+      "FreshnessDate": "2025-08-09 16:29:36"
+    },
+    {
+      "MonthKey": "2025-08-01",
+      "LocalityID": 16583,
+      "MicroMarketID": 271,
+      "MedianPricePSF": 27649.7695852534,
+      "SampleSize": 1,
+      "FreshnessDate": "2025-08-07 09:34:48"
+    },
+    {
+      "MonthKey": "2025-08-01",
+      "LocalityID": 16583,
+      "MicroMarketID": 271,
+      "MedianPricePSF": 25996.5337954939,
+      "SampleSize": 2,
+      "FreshnessDate": "2025-08-15 22:32:50"
+    },
+    {
+      "MonthKey": "2025-08-01",
+      "LocalityID": 16583,
+      "MicroMarketID": 271,
+      "MedianPricePSF": 30136.9863013698,
+      "SampleSize": 1,
+      "FreshnessDate": "2025-08-07 09:44:14"
+    }
+  ]
+}
