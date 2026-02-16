@@ -33,6 +33,14 @@ type MetricsDoc = {
   notes?: string[];
 };
 
+type PinnedSelection = {
+  level: ChoroplethLevel;
+  joinKey: string;
+  displayName: string;
+  featureId: unknown;
+  lngLat: { lng: number; lat: number };
+};
+
 const DEFAULT_CENTER: [number, number] = [72.8777, 19.076]; // Mumbai
 const DEFAULT_ZOOM = 10.5;
 
@@ -43,6 +51,14 @@ const HIT_LAYERS = {
   localities: "localities-hit",
   roads: "roads-hit",
   projects: "projects-hit",
+} as const;
+
+// V2 highlight overlay layers (polygons only)
+const HIGHLIGHT = {
+  mmFill: "pinned-mm-fill",
+  mmLine: "pinned-mm-line",
+  locFill: "pinned-loc-fill",
+  locLine: "pinned-loc-line",
 } as const;
 
 function safeJson(v: unknown) {
@@ -62,6 +78,67 @@ function parseMonthLabel(yyyyMm01: string) {
   const d = new Date(yyyyMm01 + "T00:00:00Z");
   if (Number.isNaN(d.getTime())) return yyyyMm01;
   return d.toLocaleString("en-US", { month: "short", year: "numeric" });
+}
+
+function getStrProp(props: Record<string, unknown> | null | undefined, key: string): string {
+  const v = props?.[key];
+  return typeof v === "string" ? v : "";
+}
+
+function clamp(n: number, lo: number, hi: number) {
+  return Math.max(lo, Math.min(hi, n));
+}
+
+function percentile(sorted: number[], p: number) {
+  if (!sorted.length) return null;
+  const idx = (sorted.length - 1) * p;
+  const lo = Math.floor(idx);
+  const hi = Math.ceil(idx);
+  if (lo === hi) return sorted[lo];
+  const w = idx - lo;
+  return sorted[lo] * (1 - w) + sorted[hi] * w;
+}
+
+function bboxFromFeatures(features: any[]) {
+  let minLng = Number.POSITIVE_INFINITY;
+  let minLat = Number.POSITIVE_INFINITY;
+  let maxLng = Number.NEGATIVE_INFINITY;
+  let maxLat = Number.NEGATIVE_INFINITY;
+
+  const pushCoord = (lng: number, lat: number) => {
+    if (!Number.isFinite(lng) || !Number.isFinite(lat)) return;
+    minLng = Math.min(minLng, lng);
+    minLat = Math.min(minLat, lat);
+    maxLng = Math.max(maxLng, lng);
+    maxLat = Math.max(maxLat, lat);
+  };
+
+  for (const f of features) {
+    const g = f?.geometry;
+    if (!g) continue;
+
+    // Polygon: [ [ [lng,lat], ... ] , ... ]
+    // MultiPolygon: [ [ [ [lng,lat], ... ] , ... ] , ... ]
+    if (g.type === "Polygon") {
+      for (const ring of g.coordinates ?? []) {
+        for (const c of ring ?? []) pushCoord(c?.[0], c?.[1]);
+      }
+    } else if (g.type === "MultiPolygon") {
+      for (const poly of g.coordinates ?? []) {
+        for (const ring of poly ?? []) {
+          for (const c of ring ?? []) pushCoord(c?.[0], c?.[1]);
+        }
+      }
+    }
+  }
+
+  if (!Number.isFinite(minLng) || !Number.isFinite(minLat) || !Number.isFinite(maxLng) || !Number.isFinite(maxLat)) {
+    return null;
+  }
+  return [
+    [minLng, minLat] as [number, number],
+    [maxLng, maxLat] as [number, number],
+  ] as const;
 }
 
 export default function MapView() {
@@ -95,13 +172,20 @@ export default function MapView() {
   const [mmDoc, setMmDoc] = useState<MetricsDoc | null>(null);
   const [locDoc, setLocDoc] = useState<MetricsDoc | null>(null);
 
+  // Dynamic choropleth stops based on viewport (p20/p40/p60/p80)
+  const [dynStops, setDynStops] = useState<number[] | null>(null);
+
   // Legend stats
   const [legend, setLegend] = useState<{
     min: number | null;
     max: number | null;
     count: number;
     missing: number;
-  }>({ min: null, max: null, count: 0, missing: 0 });
+    coveragePct: number | null;
+  }>({ min: null, max: null, count: 0, missing: 0, coveragePct: null });
+
+  // V2 pinned selection (only for micromarkets/localities polygons)
+  const [pinned, setPinned] = useState<PinnedSelection | null>(null);
 
   const token = process.env.NEXT_PUBLIC_MAPBOX_TOKEN;
 
@@ -249,7 +333,6 @@ export default function MapView() {
 
       // -----------------------------
       // HIT layers (transparent, on top)
-      // These make hover/click reliable for thin lines / small points / occluded polygons.
       // -----------------------------
       map.addLayer({
         id: HIT_LAYERS.city,
@@ -289,6 +372,45 @@ export default function MapView() {
         source: "projects-src",
         "source-layer": TILESETS.projects.sourceLayer,
         paint: { "circle-radius": 10, "circle-opacity": 0 },
+      });
+
+      // -----------------------------
+      // V2 pinned highlight overlays (full polygon via vector filter)
+      // -----------------------------
+      map.addLayer({
+        id: HIGHLIGHT.mmFill,
+        type: "fill",
+        source: "micromarkets-src",
+        "source-layer": TILESETS.micromarkets.sourceLayer,
+        paint: { "fill-color": "#F59E0B", "fill-opacity": 0.12 },
+        filter: ["==", ["id"], "__none__"],
+      });
+
+      map.addLayer({
+        id: HIGHLIGHT.mmLine,
+        type: "line",
+        source: "micromarkets-src",
+        "source-layer": TILESETS.micromarkets.sourceLayer,
+        paint: { "line-color": "#F59E0B", "line-width": 3 },
+        filter: ["==", ["id"], "__none__"],
+      });
+
+      map.addLayer({
+        id: HIGHLIGHT.locFill,
+        type: "fill",
+        source: "localities-src",
+        "source-layer": TILESETS.localities.sourceLayer,
+        paint: { "fill-color": "#F59E0B", "fill-opacity": 0.12 },
+        filter: ["==", ["get", "LocalityName"], "__none__"],
+      });
+
+      map.addLayer({
+        id: HIGHLIGHT.locLine,
+        type: "line",
+        source: "localities-src",
+        "source-layer": TILESETS.localities.sourceLayer,
+        paint: { "line-color": "#F59E0B", "line-width": 3 },
+        filter: ["==", ["get", "LocalityName"], "__none__"],
       });
 
       // Inspector handlers
@@ -333,6 +455,7 @@ export default function MapView() {
 
         const f = features[0];
         const props = (f.properties ?? {}) as Record<string, unknown>;
+
         setClickInfo({
           layerId: f.layer.id,
           sourceLayer: (f.layer as any)["source-layer"] ?? "",
@@ -341,6 +464,36 @@ export default function MapView() {
           properties: props,
           lngLat: { lng: e.lngLat.lng, lat: e.lngLat.lat },
         });
+
+        // V2: Pinned selection only for polygon levels
+        const fid = (f as any).id ?? null;
+
+        if (layer === HIT_LAYERS.micromarkets && fid !== null) {
+          const name =
+            getStrProp(props, "MicroMarketName") ||
+            getStrProp(props, "MicromarketName") ||
+            getStrProp(props, "Micromarket") ||
+            `Micromarket ${String(fid)}`;
+
+          setPinned({
+            level: "micromarkets",
+            joinKey: String(fid),
+            displayName: name,
+            featureId: fid,
+            lngLat: { lng: e.lngLat.lng, lat: e.lngLat.lat },
+          });
+        } else if (layer === HIT_LAYERS.localities && fid !== null) {
+          const lname = getStrProp(props, "LocalityName") || "";
+          if (lname) {
+            setPinned({
+              level: "localities",
+              joinKey: lname,
+              displayName: lname,
+              featureId: fid,
+              lngLat: { lng: e.lngLat.lng, lat: e.lngLat.lat },
+            });
+          }
+        }
       };
 
       map.on("mousemove", onMove);
@@ -353,6 +506,17 @@ export default function MapView() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token, vectorSources]);
+
+  // -----------------------------
+  // ESC to clear pinned
+  // -----------------------------
+  useEffect(() => {
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key === "Escape") setPinned(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   // -----------------------------
   // Layer visibility toggles (+ keep hit layers in sync)
@@ -381,6 +545,12 @@ export default function MapView() {
 
     // City hit always on (city outline always on)
     setLayerVisibility(map, HIT_LAYERS.city, true);
+
+    // Highlight overlay should respect layer visibility
+    setLayerVisibility(map, HIGHLIGHT.mmFill, showMicromarkets);
+    setLayerVisibility(map, HIGHLIGHT.mmLine, showMicromarkets);
+    setLayerVisibility(map, HIGHLIGHT.locFill, showLocalities);
+    setLayerVisibility(map, HIGHLIGHT.locLine, showLocalities);
   }, [showLocalities, showMicromarkets, showProjects, showRoads]);
 
   // -----------------------------
@@ -432,7 +602,62 @@ export default function MapView() {
   }, [enable3D]);
 
   // -----------------------------
-  // V1 Choropleth: paint config
+  // V2 pinned highlight: set filters + zoom-to
+  // -----------------------------
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    if (!map.isStyleLoaded()) return;
+
+    // reset highlight filters
+    if (!pinned) {
+      if (map.getLayer(HIGHLIGHT.mmFill)) map.setFilter(HIGHLIGHT.mmFill, ["==", ["id"], "__none__"]);
+      if (map.getLayer(HIGHLIGHT.mmLine)) map.setFilter(HIGHLIGHT.mmLine, ["==", ["id"], "__none__"]);
+      if (map.getLayer(HIGHLIGHT.locFill)) map.setFilter(HIGHLIGHT.locFill, ["==", ["get", "LocalityName"], "__none__"]);
+      if (map.getLayer(HIGHLIGHT.locLine)) map.setFilter(HIGHLIGHT.locLine, ["==", ["get", "LocalityName"], "__none__"]);
+      return;
+    }
+
+    if (pinned.level === "micromarkets") {
+      // show mm highlight only
+      if (map.getLayer(HIGHLIGHT.mmFill)) map.setFilter(HIGHLIGHT.mmFill, ["==", ["id"], pinned.featureId as any]);
+      if (map.getLayer(HIGHLIGHT.mmLine)) map.setFilter(HIGHLIGHT.mmLine, ["==", ["id"], pinned.featureId as any]);
+      if (map.getLayer(HIGHLIGHT.locFill)) map.setFilter(HIGHLIGHT.locFill, ["==", ["get", "LocalityName"], "__none__"]);
+      if (map.getLayer(HIGHLIGHT.locLine)) map.setFilter(HIGHLIGHT.locLine, ["==", ["get", "LocalityName"], "__none__"]);
+    } else {
+      // show locality highlight only
+      if (map.getLayer(HIGHLIGHT.locFill)) map.setFilter(HIGHLIGHT.locFill, ["==", ["get", "LocalityName"], pinned.joinKey]);
+      if (map.getLayer(HIGHLIGHT.locLine)) map.setFilter(HIGHLIGHT.locLine, ["==", ["get", "LocalityName"], pinned.joinKey]);
+      if (map.getLayer(HIGHLIGHT.mmFill)) map.setFilter(HIGHLIGHT.mmFill, ["==", ["id"], "__none__"]);
+      if (map.getLayer(HIGHLIGHT.mmLine)) map.setFilter(HIGHLIGHT.mmLine, ["==", ["id"], "__none__"]);
+    }
+
+    // zoom-to after render settles (idle)
+    const layerForBbox = pinned.level === "micromarkets" ? HIGHLIGHT.mmFill : HIGHLIGHT.locFill;
+
+    const onIdle = () => {
+      try {
+        const feats = map.queryRenderedFeatures({ layers: [layerForBbox] }) as any[];
+        const bb = bboxFromFeatures(feats);
+        if (bb) {
+          map.fitBounds(bb, { padding: 60, duration: 450 });
+        } else {
+          // fallback: small easeTo using click lngLat
+          map.easeTo({ center: [pinned.lngLat.lng, pinned.lngLat.lat], duration: 350, zoom: Math.max(map.getZoom(), 11) });
+        }
+      } catch {
+        // ignore
+      }
+    };
+
+    map.once("idle", onIdle);
+    return () => {
+      // once() cleans itself
+    };
+  }, [pinned]);
+
+  // -----------------------------
+  // V1 Choropleth: paint config (uses dynStops if available)
   // -----------------------------
   useEffect(() => {
     const map = mapRef.current;
@@ -451,6 +676,8 @@ export default function MapView() {
 
     const valueExpr: any = ["coalesce", ["feature-state", "v"], -1];
 
+    const stops = dynStops && dynStops.length === 4 ? dynStops : [5000, 15000, 25000, 35000];
+
     map.setPaintProperty(fillLayer, "fill-color", [
       "case",
       ["<=", valueExpr, -1],
@@ -459,15 +686,15 @@ export default function MapView() {
         "interpolate",
         ["linear"],
         valueExpr,
-        5000,
+        stops[0],
         "#E0F2FE",
-        15000,
+        stops[1],
         "#93C5FD",
-        25000,
+        stops[2],
         "#60A5FA",
-        35000,
+        stops[3],
         "#3B82F6",
-        50000,
+        Math.max(stops[3] + 1, stops[3] * 1.2),
         "#1D4ED8",
       ],
     ]);
@@ -478,17 +705,18 @@ export default function MapView() {
       0.04,
       isMm ? 0.28 : 0.24,
     ]);
-  }, [enableChoropleth, choroplethLevel]);
+  }, [enableChoropleth, choroplethLevel, dynStops]);
 
   // -----------------------------
-  // V1 Choropleth: apply feature-state for visible features
+  // V1 Choropleth: apply feature-state for visible features + compute legend + dynStops
   // -----------------------------
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
 
     if (!enableChoropleth) {
-      setLegend({ min: null, max: null, count: 0, missing: 0 });
+      setLegend({ min: null, max: null, count: 0, missing: 0, coveragePct: null });
+      setDynStops(null);
       return;
     }
 
@@ -516,6 +744,8 @@ export default function MapView() {
       let count = 0;
       let missing = 0;
 
+      const values: number[] = [];
+
       for (const f of features) {
         const fid = f?.id;
         if (fid === undefined || fid === null) continue;
@@ -533,6 +763,7 @@ export default function MapView() {
 
         if (typeof v === "number" && Number.isFinite(v)) {
           count += 1;
+          values.push(v);
           min = Math.min(min, v);
           max = Math.max(max, v);
           map.setFeatureState({ source: sourceId, sourceLayer, id: fid }, { v, n: bucket?.n ?? null });
@@ -542,12 +773,44 @@ export default function MapView() {
         }
       }
 
+      // Legend coverage
+      const total = count + missing;
+      const coveragePct = total > 0 ? Math.round((count / total) * 100) : null;
+
       setLegend({
         min: count > 0 ? min : null,
         max: count > 0 ? max : null,
         count,
         missing,
+        coveragePct,
       });
+
+      // Dynamic stops from viewport percentiles
+      if (values.length >= 8) {
+        values.sort((a, b) => a - b);
+        const p20 = percentile(values, 0.2);
+        const p40 = percentile(values, 0.4);
+        const p60 = percentile(values, 0.6);
+        const p80 = percentile(values, 0.8);
+
+        if (
+          typeof p20 === "number" &&
+          typeof p40 === "number" &&
+          typeof p60 === "number" &&
+          typeof p80 === "number"
+        ) {
+          // ensure increasing
+          const s0 = Math.max(1, p20);
+          const s1 = Math.max(s0 + 1, p40);
+          const s2 = Math.max(s1 + 1, p60);
+          const s3 = Math.max(s2 + 1, p80);
+          setDynStops([s0, s1, s2, s3]);
+        } else {
+          setDynStops(null);
+        }
+      } else {
+        setDynStops(null);
+      }
     };
 
     computeLegendAndApply();
@@ -583,6 +846,35 @@ export default function MapView() {
       setMetricMonth(monthOptions[monthOptions.length - 1]);
     }
   }, [monthOptions, metricMonth]);
+
+  // -----------------------------
+  // V2 pinned details computed values
+  // -----------------------------
+  const pinnedDoc = useMemo(() => {
+    if (!pinned) return null;
+    return pinned.level === "micromarkets" ? mmDoc : locDoc;
+  }, [pinned, mmDoc, locDoc]);
+
+  const pinnedCurrent = useMemo(() => {
+    if (!pinned || !pinnedDoc || !metricMonth) return null;
+    const monthMap = pinnedDoc.byMonth?.[metricMonth];
+    if (!monthMap) return null;
+    return monthMap[pinned.joinKey] ?? null;
+  }, [pinned, pinnedDoc, metricMonth]);
+
+  const pinnedSeries = useMemo(() => {
+    if (!pinned || !pinnedDoc) return [];
+    const months = pinnedDoc.months ?? [];
+    const rows = months.map((m) => {
+      const bucket = pinnedDoc.byMonth?.[m]?.[pinned.joinKey];
+      return {
+        month: m,
+        v: typeof bucket?.v === "number" ? bucket.v : null,
+        n: typeof bucket?.n === "number" ? bucket.n : null,
+      };
+    });
+    return rows;
+  }, [pinned, pinnedDoc]);
 
   return (
     <div style={{ display: "grid", gridTemplateColumns: "1fr 420px", height: "100vh" }}>
@@ -654,7 +946,21 @@ export default function MapView() {
               <div>
                 Viewport: <span style={{ fontWeight: 600 }}>{legend.count}</span> colored,{" "}
                 <span style={{ fontWeight: 600 }}>{legend.missing}</span> missing
+                {typeof legend.coveragePct === "number" ? (
+                  <>
+                    {" "}
+                    (<span style={{ fontWeight: 600 }}>{legend.coveragePct}%</span> coverage)
+                  </>
+                ) : null}
               </div>
+              {dynStops && dynStops.length === 4 ? (
+                <div style={{ opacity: 0.85 }}>
+                  Scale (viewport): p20 {fmtMoney(dynStops[0])}, p40 {fmtMoney(dynStops[1])}, p60 {fmtMoney(dynStops[2])}, p80{" "}
+                  {fmtMoney(dynStops[3])}
+                </div>
+              ) : (
+                <div style={{ opacity: 0.75 }}>Scale: fallback thresholds (insufficient viewport samples)</div>
+              )}
             </div>
 
             <div style={{ marginTop: 8, display: "grid", gap: 6 }}>
@@ -680,6 +986,120 @@ export default function MapView() {
                 </div>
               ))}
             </div>
+          </div>
+
+          {/* V2 Pinned details */}
+          <div style={{ marginTop: 12, paddingTop: 10, borderTop: "1px solid #e5e7eb" }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+              <div style={{ fontWeight: 600 }}>Pinned (click a Micromarket/Locality polygon)</div>
+              <button
+                onClick={() => setPinned(null)}
+                style={{
+                  fontSize: 12,
+                  padding: "6px 8px",
+                  border: "1px solid #e5e7eb",
+                  borderRadius: 6,
+                  background: "white",
+                  cursor: "pointer",
+                }}
+                disabled={!pinned}
+                title={!pinned ? "Nothing pinned" : "Clear pinned selection"}
+              >
+                Clear
+              </button>
+            </div>
+
+            {!pinned ? (
+              <div style={{ fontSize: 12, opacity: 0.75, marginTop: 6 }}>
+                Tip: set Inspect target to Micromarkets or Localities, then click a polygon. Press ESC to clear.
+              </div>
+            ) : (
+              <div style={{ marginTop: 8, fontSize: 12, opacity: 0.92, display: "grid", gap: 6 }}>
+                <div>
+                  Level: <span style={{ fontWeight: 600 }}>{pinned.level}</span>
+                </div>
+                <div>
+                  Name: <span style={{ fontWeight: 600 }}>{pinned.displayName}</span>
+                </div>
+                <div>
+                  Join key:{" "}
+                  <span style={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" }}>
+                    {pinned.joinKey}
+                  </span>
+                </div>
+                <div>
+                  Month value (psf):{" "}
+                  <span style={{ fontWeight: 600 }}>
+                    {pinnedCurrent?.v !== undefined && typeof pinnedCurrent?.v === "number" ? fmtMoney(pinnedCurrent.v) : "-"}
+                  </span>{" "}
+                  <span style={{ opacity: 0.85 }}>
+                    (n: {pinnedCurrent?.n !== undefined && typeof pinnedCurrent?.n === "number" ? pinnedCurrent.n : "-"})
+                  </span>
+                </div>
+
+                <div style={{ marginTop: 6, fontWeight: 600 }}>Time series</div>
+                <div style={{ border: "1px solid #e5e7eb", borderRadius: 8, overflow: "hidden" }}>
+                  <div style={{ maxHeight: 220, overflow: "auto" }}>
+                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                      <thead>
+                        <tr style={{ position: "sticky", top: 0, background: "white" }}>
+                          <th style={{ textAlign: "left", padding: "8px 10px", borderBottom: "1px solid #e5e7eb" }}>
+                            Month
+                          </th>
+                          <th style={{ textAlign: "right", padding: "8px 10px", borderBottom: "1px solid #e5e7eb" }}>
+                            psf
+                          </th>
+                          <th style={{ textAlign: "right", padding: "8px 10px", borderBottom: "1px solid #e5e7eb" }}>
+                            n
+                          </th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {pinnedSeries.map((r) => {
+                          const isActive = r.month === metricMonth;
+                          return (
+                            <tr key={r.month} style={{ background: isActive ? "#F9FAFB" : "transparent" }}>
+                              <td style={{ padding: "8px 10px", borderBottom: "1px solid #f3f4f6" }}>
+                                {parseMonthLabel(r.month)}
+                              </td>
+                              <td
+                                style={{
+                                  padding: "8px 10px",
+                                  textAlign: "right",
+                                  borderBottom: "1px solid #f3f4f6",
+                                }}
+                              >
+                                {typeof r.v === "number" ? fmtMoney(r.v) : "-"}
+                              </td>
+                              <td
+                                style={{
+                                  padding: "8px 10px",
+                                  textAlign: "right",
+                                  borderBottom: "1px solid #f3f4f6",
+                                }}
+                              >
+                                {typeof r.n === "number" ? r.n : "-"}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                {pinnedDoc?.notes?.length ? (
+                  <div style={{ marginTop: 6, fontSize: 12, opacity: 0.85 }}>
+                    Notes:
+                    <ul style={{ margin: "6px 0 0 18px" }}>
+                      {pinnedDoc.notes.map((n, idx) => (
+                        <li key={idx}>{n}</li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
+              </div>
+            )}
           </div>
         </div>
 
@@ -775,13 +1195,17 @@ export default function MapView() {
         <hr style={{ margin: "12px 0" }} />
 
         <div style={{ fontSize: 12, opacity: 0.85 }}>
-          <div style={{ fontWeight: 600, marginBottom: 6 }}>V1 goal right now</div>
+          <div style={{ fontWeight: 600, marginBottom: 6 }}>Notes</div>
           <div>
             Choropleth join keys:
             <ul style={{ margin: "6px 0 0 18px" }}>
-              <li>Micromarkets: join by polygon <code>featureId</code> (matches JSON keys)</li>
-              <li>Localities: join by <code>properties.LocalityName</code> (matches JSON keys)</li>
-              <li>Projects: (later) can support point metrics similarly</li>
+              <li>
+                Micromarkets: join by polygon <code>featureId</code> (matches JSON keys)
+              </li>
+              <li>
+                Localities: join by <code>properties.LocalityName</code> (matches JSON keys)
+              </li>
+              <li>Projects: later can support point metrics similarly</li>
             </ul>
           </div>
           <div style={{ marginTop: 8 }}>
