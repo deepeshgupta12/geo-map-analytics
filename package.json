@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "tileset:layers": "node scripts/tileset_layers.mjs"
   },
   "dependencies": {
     "mapbox-gl": "^3.18.1",
