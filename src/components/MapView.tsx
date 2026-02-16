@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import mapboxgl, { Map, MapMouseEvent } from "mapbox-gl";
+import mapboxgl, { LngLatBoundsLike, Map, MapMouseEvent } from "mapbox-gl";
 import { TILESETS } from "@/config/tilesets";
 
 type PickInfo = {
@@ -37,7 +37,7 @@ type PinnedSelection = {
   level: ChoroplethLevel;
   joinKey: string;
   displayName: string;
-  featureId: unknown;
+  featureId: unknown; // numeric id for micromarkets; vector feature id for localities (not used for filter)
   lngLat: { lng: number; lat: number };
 };
 
@@ -53,11 +53,12 @@ const HIT_LAYERS = {
   projects: "projects-hit",
 } as const;
 
-// V2 pinned highlight layers/source
-const PINNED = {
-  sourceId: "pinned-src",
-  fillId: "pinned-fill",
-  outlineId: "pinned-outline",
+// Pinned highlight layers (rendered from vector sources + filters; not from clipped geometry)
+const PIN_LAYERS = {
+  mmFill: "pinned-mm-fill",
+  mmLine: "pinned-mm-line",
+  locFill: "pinned-loc-fill",
+  locLine: "pinned-loc-line",
 } as const;
 
 function safeJson(v: unknown) {
@@ -84,75 +85,207 @@ function getStrProp(props: Record<string, unknown> | null | undefined, key: stri
   return typeof v === "string" ? v : "";
 }
 
-type GeoJSONGeometry =
-  | { type: "Polygon"; coordinates: number[][][] }
-  | { type: "MultiPolygon"; coordinates: number[][][][] }
-  | { type: string; coordinates: any };
-
-function isPolygonGeom(g: any): g is { type: "Polygon"; coordinates: number[][][] } {
-  return g?.type === "Polygon" && Array.isArray(g?.coordinates);
+function setLayerVisibility(map: Map, layerId: string, visible: boolean) {
+  if (!map.getLayer(layerId)) return;
+  map.setLayoutProperty(layerId, "visibility", visible ? "visible" : "none");
 }
 
-function isMultiPolygonGeom(g: any): g is { type: "MultiPolygon"; coordinates: number[][][][] } {
-  return g?.type === "MultiPolygon" && Array.isArray(g?.coordinates);
+function targetToLayerId(target: InspectTarget) {
+  // Use HIT layers so querying is reliable
+  switch (target) {
+    case "localities":
+      return HIT_LAYERS.localities;
+    case "micromarkets":
+      return HIT_LAYERS.micromarkets;
+    case "projects":
+      return HIT_LAYERS.projects;
+    case "roads":
+      return HIT_LAYERS.roads;
+    case "city":
+      return HIT_LAYERS.city;
+  }
 }
 
-function bboxFromGeometry(geom: GeoJSONGeometry): mapboxgl.LngLatBoundsLike | null {
+function computeBoundsFromGeoJSONGeometry(geom: any): mapboxgl.LngLatBounds | null {
+  if (!geom || !geom.type || !geom.coordinates) return null;
+
+  const bounds = new mapboxgl.LngLatBounds();
+
+  const extend = (lng: number, lat: number) => {
+    if (!Number.isFinite(lng) || !Number.isFinite(lat)) return;
+    bounds.extend([lng, lat]);
+  };
+
+  const walkCoords = (coords: any) => {
+    if (!coords) return;
+    // coordinate = [lng, lat]
+    if (Array.isArray(coords) && coords.length === 2 && typeof coords[0] === "number" && typeof coords[1] === "number") {
+      extend(coords[0], coords[1]);
+      return;
+    }
+    // nested arrays
+    if (Array.isArray(coords)) {
+      for (const c of coords) walkCoords(c);
+    }
+  };
+
+  walkCoords(geom.coordinates);
+
   try {
-    let minLng = Number.POSITIVE_INFINITY;
-    let minLat = Number.POSITIVE_INFINITY;
-    let maxLng = Number.NEGATIVE_INFINITY;
-    let maxLat = Number.NEGATIVE_INFINITY;
-
-    const consumePoint = (pt: any) => {
-      const lng = Number(pt?.[0]);
-      const lat = Number(pt?.[1]);
-      if (!Number.isFinite(lng) || !Number.isFinite(lat)) return;
-      minLng = Math.min(minLng, lng);
-      minLat = Math.min(minLat, lat);
-      maxLng = Math.max(maxLng, lng);
-      maxLat = Math.max(maxLat, lat);
-    };
-
-    if (isPolygonGeom(geom)) {
-      for (const ring of geom.coordinates) {
-        for (const pt of ring) consumePoint(pt);
-      }
-    } else if (isMultiPolygonGeom(geom)) {
-      for (const poly of geom.coordinates) {
-        for (const ring of poly) {
-          for (const pt of ring) consumePoint(pt);
-        }
-      }
-    } else {
-      // Fallback: best-effort recursive walk for other geometry types
-      const walk = (node: any) => {
-        if (!node) return;
-        if (Array.isArray(node) && node.length === 2 && typeof node[0] === "number" && typeof node[1] === "number") {
-          consumePoint(node);
-          return;
-        }
-        if (Array.isArray(node)) {
-          for (const x of node) walk(x);
-        } else if (typeof node === "object") {
-          for (const k of Object.keys(node)) walk((node as any)[k]);
-        }
-      };
-      walk((geom as any).coordinates);
-    }
-
-    if (!Number.isFinite(minLng) || !Number.isFinite(minLat) || !Number.isFinite(maxLng) || !Number.isFinite(maxLat)) {
-      return null;
-    }
-
-    // [sw, ne]
-    return [
-      [minLng, minLat],
-      [maxLng, maxLat],
-    ];
+    // if never extended, bounds is invalid
+    const sw = bounds.getSouthWest();
+    const ne = bounds.getNorthEast();
+    if (!Number.isFinite(sw.lng) || !Number.isFinite(ne.lng)) return null;
   } catch {
     return null;
   }
+
+  return bounds;
+}
+
+function ensurePinnedLayers(map: Map) {
+  // Add pinned layers once (they can stay hidden until a pin happens)
+  if (!map.getLayer(PIN_LAYERS.mmFill)) {
+    map.addLayer({
+      id: PIN_LAYERS.mmFill,
+      type: "fill",
+      source: "micromarkets-src",
+      "source-layer": TILESETS.micromarkets.sourceLayer,
+      paint: {
+        "fill-color": "#F97316",
+        "fill-opacity": 0.10,
+      },
+      filter: ["==", ["id"], -1],
+    });
+  }
+
+  if (!map.getLayer(PIN_LAYERS.mmLine)) {
+    map.addLayer({
+      id: PIN_LAYERS.mmLine,
+      type: "line",
+      source: "micromarkets-src",
+      "source-layer": TILESETS.micromarkets.sourceLayer,
+      paint: {
+        "line-color": "#F97316",
+        "line-width": 3,
+      },
+      filter: ["==", ["id"], -1],
+    });
+  }
+
+  if (!map.getLayer(PIN_LAYERS.locFill)) {
+    map.addLayer({
+      id: PIN_LAYERS.locFill,
+      type: "fill",
+      source: "localities-src",
+      "source-layer": TILESETS.localities.sourceLayer,
+      paint: {
+        "fill-color": "#F97316",
+        "fill-opacity": 0.10,
+      },
+      filter: ["==", "LocalityName", "__never__"],
+    });
+  }
+
+  if (!map.getLayer(PIN_LAYERS.locLine)) {
+    map.addLayer({
+      id: PIN_LAYERS.locLine,
+      type: "line",
+      source: "localities-src",
+      "source-layer": TILESETS.localities.sourceLayer,
+      paint: {
+        "line-color": "#F97316",
+        "line-width": 3,
+      },
+      filter: ["==", "LocalityName", "__never__"],
+    });
+  }
+}
+
+function applyPinnedHighlight(map: Map, pinned: PinnedSelection | null, showMicromarkets: boolean, showLocalities: boolean) {
+  // Hide everything by default
+  const hideAll = () => {
+    setLayerVisibility(map, PIN_LAYERS.mmFill, false);
+    setLayerVisibility(map, PIN_LAYERS.mmLine, false);
+    setLayerVisibility(map, PIN_LAYERS.locFill, false);
+    setLayerVisibility(map, PIN_LAYERS.locLine, false);
+  };
+
+  if (!pinned) {
+    hideAll();
+    return;
+  }
+
+  // Make sure highlight layers exist
+  ensurePinnedLayers(map);
+
+  if (pinned.level === "micromarkets") {
+    // Show mm highlight only if mm layer is visible
+    setLayerVisibility(map, PIN_LAYERS.mmFill, showMicromarkets);
+    setLayerVisibility(map, PIN_LAYERS.mmLine, showMicromarkets);
+
+    setLayerVisibility(map, PIN_LAYERS.locFill, false);
+    setLayerVisibility(map, PIN_LAYERS.locLine, false);
+
+    const idNum = Number(pinned.joinKey);
+    // Filter by feature id across tiles
+    map.setFilter(PIN_LAYERS.mmFill, ["==", ["id"], Number.isFinite(idNum) ? idNum : -1]);
+    map.setFilter(PIN_LAYERS.mmLine, ["==", ["id"], Number.isFinite(idNum) ? idNum : -1]);
+  } else {
+    // Show locality highlight only if locality layer is visible
+    setLayerVisibility(map, PIN_LAYERS.locFill, showLocalities);
+    setLayerVisibility(map, PIN_LAYERS.locLine, showLocalities);
+
+    setLayerVisibility(map, PIN_LAYERS.mmFill, false);
+    setLayerVisibility(map, PIN_LAYERS.mmLine, false);
+
+    // Filter by LocalityName across tiles
+    map.setFilter(PIN_LAYERS.locFill, ["==", "LocalityName", pinned.joinKey]);
+    map.setFilter(PIN_LAYERS.locLine, ["==", "LocalityName", pinned.joinKey]);
+  }
+}
+
+function zoomToPinned(map: Map, pinned: PinnedSelection) {
+  const isMm = pinned.level === "micromarkets";
+
+  const sourceId = isMm ? "micromarkets-src" : "localities-src";
+  const sourceLayer = isMm ? TILESETS.micromarkets.sourceLayer : TILESETS.localities.sourceLayer;
+
+  if (!map.getSource(sourceId)) return;
+
+  // IMPORTANT:
+  // querySourceFeatures returns feature fragments, but combining them gives us full bounds.
+  const filter = isMm
+    ? ((): any => {
+        const idNum = Number(pinned.joinKey);
+        return ["==", ["id"], Number.isFinite(idNum) ? idNum : -1];
+      })()
+    : (["==", "LocalityName", pinned.joinKey] as any);
+
+  const feats = map.querySourceFeatures(sourceId, { sourceLayer, filter }) as any[];
+  if (!feats?.length) {
+    // fallback: center around click point
+    map.easeTo({ center: [pinned.lngLat.lng, pinned.lngLat.lat], zoom: Math.max(map.getZoom(), 12), duration: 450 });
+    return;
+  }
+
+  let bounds: mapboxgl.LngLatBounds | null = null;
+  for (const f of feats) {
+    const b = computeBoundsFromGeoJSONGeometry(f?.geometry);
+    if (!b) continue;
+    bounds = bounds ? bounds.extend(b) : b;
+  }
+
+  if (!bounds) {
+    map.easeTo({ center: [pinned.lngLat.lng, pinned.lngLat.lat], zoom: Math.max(map.getZoom(), 12), duration: 450 });
+    return;
+  }
+
+  map.fitBounds(bounds as unknown as LngLatBoundsLike, {
+    padding: { top: 60, bottom: 60, left: 60, right: 460 }, // account for right inspector
+    duration: 550,
+    maxZoom: 13.5,
+  });
 }
 
 export default function MapView() {
@@ -197,9 +330,6 @@ export default function MapView() {
   // V2 pinned selection (only for micromarkets/localities polygons)
   const [pinned, setPinned] = useState<PinnedSelection | null>(null);
 
-  // V2 pinned geometry for highlight
-  const [pinnedGeom, setPinnedGeom] = useState<GeoJSONGeometry | null>(null);
-
   const token = process.env.NEXT_PUBLIC_MAPBOX_TOKEN;
 
   const vectorSources = useMemo(() => {
@@ -212,19 +342,16 @@ export default function MapView() {
     };
   }, []);
 
-  const clearPinned = () => {
-    setPinned(null);
-    setPinnedGeom(null);
-  };
-
-  // Esc clears pinned + highlight
+  // ESC clears pinned (and click details)
   useEffect(() => {
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") clearPinned();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setPinned(null);
+        setClickInfo(null);
+      }
     };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
   }, []);
 
   // -----------------------------
@@ -303,12 +430,6 @@ export default function MapView() {
       map.addSource("localities-src", { type: "vector", url: vectorSources.localities });
       map.addSource("roads-src", { type: "vector", url: vectorSources.roads });
       map.addSource("projects-src", { type: "vector", url: vectorSources.projects });
-
-      // V2 pinned geojson source
-      map.addSource(PINNED.sourceId, {
-        type: "geojson",
-        data: { type: "FeatureCollection", features: [] },
-      });
 
       // Visible layers
       map.addLayer({
@@ -408,28 +529,13 @@ export default function MapView() {
         paint: { "circle-radius": 10, "circle-opacity": 0 },
       });
 
-      // -----------------------------
-      // V2 pinned highlight layers (always on top)
-      // -----------------------------
-      map.addLayer({
-        id: PINNED.fillId,
-        type: "fill",
-        source: PINNED.sourceId,
-        paint: {
-          "fill-color": "#F97316",
-          "fill-opacity": 0.15,
-        },
-      });
-
-      map.addLayer({
-        id: PINNED.outlineId,
-        type: "line",
-        source: PINNED.sourceId,
-        paint: {
-          "line-color": "#F97316",
-          "line-width": 3,
-        },
-      });
+      // Pinned highlight layers (must be above base layers; geometry-free, filter-based)
+      ensurePinnedLayers(map);
+      // start hidden
+      setLayerVisibility(map, PIN_LAYERS.mmFill, false);
+      setLayerVisibility(map, PIN_LAYERS.mmLine, false);
+      setLayerVisibility(map, PIN_LAYERS.locFill, false);
+      setLayerVisibility(map, PIN_LAYERS.locLine, false);
 
       // Inspector handlers
       const onMove = (e: MapMouseEvent) => {
@@ -483,24 +589,10 @@ export default function MapView() {
           lngLat: { lng: e.lngLat.lng, lat: e.lngLat.lat },
         });
 
-        // V2: Pinned selection only for polygon levels (Option A: pin only if inspectTarget is that polygon layer)
+        // V2: Pinned selection only for polygon levels (Option A)
         const fid = (f as any).id ?? null;
-        const geom = (f as any).geometry as GeoJSONGeometry | undefined;
 
-        const pinGeomAndZoom = (g: GeoJSONGeometry) => {
-          setPinnedGeom(g);
-
-          const bounds = bboxFromGeometry(g);
-          if (!bounds) return;
-
-          try {
-            m.fitBounds(bounds, { padding: 60, duration: 650 });
-          } catch {
-            // ignore zoom failures
-          }
-        };
-
-        if (layer === HIT_LAYERS.micromarkets && fid !== null && geom) {
+        if (layer === HIT_LAYERS.micromarkets && fid !== null) {
           const name =
             getStrProp(props, "MicroMarketName") ||
             getStrProp(props, "MicromarketName") ||
@@ -514,9 +606,7 @@ export default function MapView() {
             featureId: fid,
             lngLat: { lng: e.lngLat.lng, lat: e.lngLat.lat },
           });
-
-          pinGeomAndZoom(geom);
-        } else if (layer === HIT_LAYERS.localities && fid !== null && geom) {
+        } else if (layer === HIT_LAYERS.localities && fid !== null) {
           const lname = getStrProp(props, "LocalityName") || "";
           if (lname) {
             setPinned({
@@ -526,8 +616,6 @@ export default function MapView() {
               featureId: fid,
               lngLat: { lng: e.lngLat.lng, lat: e.lngLat.lat },
             });
-
-            pinGeomAndZoom(geom);
           }
         }
       };
@@ -544,30 +632,23 @@ export default function MapView() {
   }, [token, vectorSources]);
 
   // -----------------------------
-  // V2: push pinned geometry into pinned-src + toggle highlight visibility
+  // Keep pinned highlight in sync (and zoom when pin changes)
   // -----------------------------
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
 
-    const src = map.getSource(PINNED.sourceId) as mapboxgl.GeoJSONSource | undefined;
-    if (!src) return;
+    applyPinnedHighlight(map, pinned, showMicromarkets, showLocalities);
 
-    if (!pinnedGeom) {
-      src.setData({ type: "FeatureCollection", features: [] } as any);
-      setLayerVisibility(map, PINNED.fillId, false);
-      setLayerVisibility(map, PINNED.outlineId, false);
-      return;
+    if (pinned) {
+      // wait a tick so filters/tiles settle
+      window.setTimeout(() => {
+        const m = mapRef.current;
+        if (!m) return;
+        zoomToPinned(m, pinned);
+      }, 0);
     }
-
-    src.setData({
-      type: "FeatureCollection",
-      features: [{ type: "Feature", properties: {}, geometry: pinnedGeom }],
-    } as any);
-
-    setLayerVisibility(map, PINNED.fillId, true);
-    setLayerVisibility(map, PINNED.outlineId, true);
-  }, [pinnedGeom]);
+  }, [pinned, showMicromarkets, showLocalities]);
 
   // -----------------------------
   // Layer visibility toggles (+ keep hit layers in sync)
@@ -597,10 +678,9 @@ export default function MapView() {
     // City hit always on (city outline always on)
     setLayerVisibility(map, HIT_LAYERS.city, true);
 
-    // Keep pinned highlight on top regardless of toggles (visibility handled by pinnedGeom effect)
-    if (map.getLayer(PINNED.fillId)) map.moveLayer(PINNED.fillId);
-    if (map.getLayer(PINNED.outlineId)) map.moveLayer(PINNED.outlineId);
-  }, [showLocalities, showMicromarkets, showProjects, showRoads]);
+    // Keep pinned layers aligned with toggles
+    applyPinnedHighlight(map, pinned, showMicromarkets, showLocalities);
+  }, [showLocalities, showMicromarkets, showProjects, showRoads, pinned]);
 
   // -----------------------------
   // Light preset runtime
@@ -935,7 +1015,10 @@ export default function MapView() {
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
               <div style={{ fontWeight: 600 }}>Pinned (click a Micromarket/Locality polygon)</div>
               <button
-                onClick={clearPinned}
+                onClick={() => {
+                  setPinned(null);
+                  setClickInfo(null);
+                }}
                 style={{
                   fontSize: 12,
                   padding: "6px 8px",
@@ -945,7 +1028,7 @@ export default function MapView() {
                   cursor: "pointer",
                 }}
                 disabled={!pinned}
-                title={!pinned ? "Nothing pinned" : "Clear pinned selection (Esc)"}
+                title={!pinned ? "Nothing pinned" : "Clear pinned selection"}
               >
                 Clear
               </button>
@@ -953,7 +1036,7 @@ export default function MapView() {
 
             {!pinned ? (
               <div style={{ fontSize: 12, opacity: 0.75, marginTop: 6 }}>
-                Tip: set Inspect target to Micromarkets or Localities, then click a polygon. Press Esc to clear.
+                Tip: set Inspect target to Micromarkets or Localities, then click a polygon.
               </div>
             ) : (
               <div style={{ marginTop: 8, fontSize: 12, opacity: 0.92, display: "grid", gap: 6 }}>
@@ -975,7 +1058,8 @@ export default function MapView() {
                     {pinnedCurrent?.v !== undefined && typeof pinnedCurrent?.v === "number"
                       ? fmtMoney(pinnedCurrent.v)
                       : "-"}
-                  </span>{" "}
+                  </span>
+                  {"  "}
                   <span style={{ opacity: 0.85 }}>
                     (n:{" "}
                     {pinnedCurrent?.n !== undefined && typeof pinnedCurrent?.n === "number" ? pinnedCurrent.n : "-"})
@@ -1007,14 +1091,10 @@ export default function MapView() {
                               <td style={{ padding: "8px 10px", borderBottom: "1px solid #f3f4f6" }}>
                                 {parseMonthLabel(r.month)}
                               </td>
-                              <td
-                                style={{ padding: "8px 10px", textAlign: "right", borderBottom: "1px solid #f3f4f6" }}
-                              >
+                              <td style={{ padding: "8px 10px", textAlign: "right", borderBottom: "1px solid #f3f4f6" }}>
                                 {typeof r.v === "number" ? fmtMoney(r.v) : "-"}
                               </td>
-                              <td
-                                style={{ padding: "8px 10px", textAlign: "right", borderBottom: "1px solid #f3f4f6" }}
-                              >
+                              <td style={{ padding: "8px 10px", textAlign: "right", borderBottom: "1px solid #f3f4f6" }}>
                                 {typeof r.n === "number" ? r.n : "-"}
                               </td>
                             </tr>
@@ -1148,29 +1228,11 @@ export default function MapView() {
           <div style={{ marginTop: 8 }}>
             Inspector hit-testing uses transparent hit layers (thicker lines / larger points) so hover/click works reliably.
           </div>
+          <div style={{ marginTop: 8 }}>
+            Pinned highlight uses vector-source filters (not clicked geometry) so the full polygon is outlined correctly.
+          </div>
         </div>
       </div>
     </div>
   );
-}
-
-function targetToLayerId(target: InspectTarget) {
-  // Use HIT layers so querying is reliable
-  switch (target) {
-    case "localities":
-      return HIT_LAYERS.localities;
-    case "micromarkets":
-      return HIT_LAYERS.micromarkets;
-    case "projects":
-      return HIT_LAYERS.projects;
-    case "roads":
-      return HIT_LAYERS.roads;
-    case "city":
-      return HIT_LAYERS.city;
-  }
-}
-
-function setLayerVisibility(map: Map, layerId: string, visible: boolean) {
-  if (!map.getLayer(layerId)) return;
-  map.setLayoutProperty(layerId, "visibility", visible ? "visible" : "none");
 }
