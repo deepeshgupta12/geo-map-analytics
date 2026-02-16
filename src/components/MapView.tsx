@@ -53,6 +53,13 @@ const HIT_LAYERS = {
   projects: "projects-hit",
 } as const;
 
+// V2 pinned highlight layers/source
+const PINNED = {
+  sourceId: "pinned-src",
+  fillId: "pinned-fill",
+  outlineId: "pinned-outline",
+} as const;
+
 function safeJson(v: unknown) {
   try {
     return JSON.stringify(v, null, 2);
@@ -75,6 +82,77 @@ function parseMonthLabel(yyyyMm01: string) {
 function getStrProp(props: Record<string, unknown> | null | undefined, key: string): string {
   const v = props?.[key];
   return typeof v === "string" ? v : "";
+}
+
+type GeoJSONGeometry =
+  | { type: "Polygon"; coordinates: number[][][] }
+  | { type: "MultiPolygon"; coordinates: number[][][][] }
+  | { type: string; coordinates: any };
+
+function isPolygonGeom(g: any): g is { type: "Polygon"; coordinates: number[][][] } {
+  return g?.type === "Polygon" && Array.isArray(g?.coordinates);
+}
+
+function isMultiPolygonGeom(g: any): g is { type: "MultiPolygon"; coordinates: number[][][][] } {
+  return g?.type === "MultiPolygon" && Array.isArray(g?.coordinates);
+}
+
+function bboxFromGeometry(geom: GeoJSONGeometry): mapboxgl.LngLatBoundsLike | null {
+  try {
+    let minLng = Number.POSITIVE_INFINITY;
+    let minLat = Number.POSITIVE_INFINITY;
+    let maxLng = Number.NEGATIVE_INFINITY;
+    let maxLat = Number.NEGATIVE_INFINITY;
+
+    const consumePoint = (pt: any) => {
+      const lng = Number(pt?.[0]);
+      const lat = Number(pt?.[1]);
+      if (!Number.isFinite(lng) || !Number.isFinite(lat)) return;
+      minLng = Math.min(minLng, lng);
+      minLat = Math.min(minLat, lat);
+      maxLng = Math.max(maxLng, lng);
+      maxLat = Math.max(maxLat, lat);
+    };
+
+    if (isPolygonGeom(geom)) {
+      for (const ring of geom.coordinates) {
+        for (const pt of ring) consumePoint(pt);
+      }
+    } else if (isMultiPolygonGeom(geom)) {
+      for (const poly of geom.coordinates) {
+        for (const ring of poly) {
+          for (const pt of ring) consumePoint(pt);
+        }
+      }
+    } else {
+      // Fallback: best-effort recursive walk for other geometry types
+      const walk = (node: any) => {
+        if (!node) return;
+        if (Array.isArray(node) && node.length === 2 && typeof node[0] === "number" && typeof node[1] === "number") {
+          consumePoint(node);
+          return;
+        }
+        if (Array.isArray(node)) {
+          for (const x of node) walk(x);
+        } else if (typeof node === "object") {
+          for (const k of Object.keys(node)) walk((node as any)[k]);
+        }
+      };
+      walk((geom as any).coordinates);
+    }
+
+    if (!Number.isFinite(minLng) || !Number.isFinite(minLat) || !Number.isFinite(maxLng) || !Number.isFinite(maxLat)) {
+      return null;
+    }
+
+    // [sw, ne]
+    return [
+      [minLng, minLat],
+      [maxLng, maxLat],
+    ];
+  } catch {
+    return null;
+  }
 }
 
 export default function MapView() {
@@ -119,6 +197,9 @@ export default function MapView() {
   // V2 pinned selection (only for micromarkets/localities polygons)
   const [pinned, setPinned] = useState<PinnedSelection | null>(null);
 
+  // V2 pinned geometry for highlight
+  const [pinnedGeom, setPinnedGeom] = useState<GeoJSONGeometry | null>(null);
+
   const token = process.env.NEXT_PUBLIC_MAPBOX_TOKEN;
 
   const vectorSources = useMemo(() => {
@@ -129,6 +210,21 @@ export default function MapView() {
       roads: `mapbox://${TILESETS.roads.id}`,
       projects: `mapbox://${TILESETS.projects.id}`,
     };
+  }, []);
+
+  const clearPinned = () => {
+    setPinned(null);
+    setPinnedGeom(null);
+  };
+
+  // Esc clears pinned + highlight
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") clearPinned();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // -----------------------------
@@ -207,6 +303,12 @@ export default function MapView() {
       map.addSource("localities-src", { type: "vector", url: vectorSources.localities });
       map.addSource("roads-src", { type: "vector", url: vectorSources.roads });
       map.addSource("projects-src", { type: "vector", url: vectorSources.projects });
+
+      // V2 pinned geojson source
+      map.addSource(PINNED.sourceId, {
+        type: "geojson",
+        data: { type: "FeatureCollection", features: [] },
+      });
 
       // Visible layers
       map.addLayer({
@@ -306,6 +408,29 @@ export default function MapView() {
         paint: { "circle-radius": 10, "circle-opacity": 0 },
       });
 
+      // -----------------------------
+      // V2 pinned highlight layers (always on top)
+      // -----------------------------
+      map.addLayer({
+        id: PINNED.fillId,
+        type: "fill",
+        source: PINNED.sourceId,
+        paint: {
+          "fill-color": "#F97316",
+          "fill-opacity": 0.15,
+        },
+      });
+
+      map.addLayer({
+        id: PINNED.outlineId,
+        type: "line",
+        source: PINNED.sourceId,
+        paint: {
+          "line-color": "#F97316",
+          "line-width": 3,
+        },
+      });
+
       // Inspector handlers
       const onMove = (e: MapMouseEvent) => {
         const m = mapRef.current;
@@ -358,10 +483,24 @@ export default function MapView() {
           lngLat: { lng: e.lngLat.lng, lat: e.lngLat.lat },
         });
 
-        // V2: Pinned selection only for polygon levels
+        // V2: Pinned selection only for polygon levels (Option A: pin only if inspectTarget is that polygon layer)
         const fid = (f as any).id ?? null;
+        const geom = (f as any).geometry as GeoJSONGeometry | undefined;
 
-        if (layer === HIT_LAYERS.micromarkets && fid !== null) {
+        const pinGeomAndZoom = (g: GeoJSONGeometry) => {
+          setPinnedGeom(g);
+
+          const bounds = bboxFromGeometry(g);
+          if (!bounds) return;
+
+          try {
+            m.fitBounds(bounds, { padding: 60, duration: 650 });
+          } catch {
+            // ignore zoom failures
+          }
+        };
+
+        if (layer === HIT_LAYERS.micromarkets && fid !== null && geom) {
           const name =
             getStrProp(props, "MicroMarketName") ||
             getStrProp(props, "MicromarketName") ||
@@ -375,7 +514,9 @@ export default function MapView() {
             featureId: fid,
             lngLat: { lng: e.lngLat.lng, lat: e.lngLat.lat },
           });
-        } else if (layer === HIT_LAYERS.localities && fid !== null) {
+
+          pinGeomAndZoom(geom);
+        } else if (layer === HIT_LAYERS.localities && fid !== null && geom) {
           const lname = getStrProp(props, "LocalityName") || "";
           if (lname) {
             setPinned({
@@ -385,6 +526,8 @@ export default function MapView() {
               featureId: fid,
               lngLat: { lng: e.lngLat.lng, lat: e.lngLat.lat },
             });
+
+            pinGeomAndZoom(geom);
           }
         }
       };
@@ -399,6 +542,32 @@ export default function MapView() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token, vectorSources]);
+
+  // -----------------------------
+  // V2: push pinned geometry into pinned-src + toggle highlight visibility
+  // -----------------------------
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+
+    const src = map.getSource(PINNED.sourceId) as mapboxgl.GeoJSONSource | undefined;
+    if (!src) return;
+
+    if (!pinnedGeom) {
+      src.setData({ type: "FeatureCollection", features: [] } as any);
+      setLayerVisibility(map, PINNED.fillId, false);
+      setLayerVisibility(map, PINNED.outlineId, false);
+      return;
+    }
+
+    src.setData({
+      type: "FeatureCollection",
+      features: [{ type: "Feature", properties: {}, geometry: pinnedGeom }],
+    } as any);
+
+    setLayerVisibility(map, PINNED.fillId, true);
+    setLayerVisibility(map, PINNED.outlineId, true);
+  }, [pinnedGeom]);
 
   // -----------------------------
   // Layer visibility toggles (+ keep hit layers in sync)
@@ -427,6 +596,10 @@ export default function MapView() {
 
     // City hit always on (city outline always on)
     setLayerVisibility(map, HIT_LAYERS.city, true);
+
+    // Keep pinned highlight on top regardless of toggles (visibility handled by pinnedGeom effect)
+    if (map.getLayer(PINNED.fillId)) map.moveLayer(PINNED.fillId);
+    if (map.getLayer(PINNED.outlineId)) map.moveLayer(PINNED.outlineId);
   }, [showLocalities, showMicromarkets, showProjects, showRoads]);
 
   // -----------------------------
@@ -762,7 +935,7 @@ export default function MapView() {
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
               <div style={{ fontWeight: 600 }}>Pinned (click a Micromarket/Locality polygon)</div>
               <button
-                onClick={() => setPinned(null)}
+                onClick={clearPinned}
                 style={{
                   fontSize: 12,
                   padding: "6px 8px",
@@ -772,7 +945,7 @@ export default function MapView() {
                   cursor: "pointer",
                 }}
                 disabled={!pinned}
-                title={!pinned ? "Nothing pinned" : "Clear pinned selection"}
+                title={!pinned ? "Nothing pinned" : "Clear pinned selection (Esc)"}
               >
                 Clear
               </button>
@@ -780,7 +953,7 @@ export default function MapView() {
 
             {!pinned ? (
               <div style={{ fontSize: 12, opacity: 0.75, marginTop: 6 }}>
-                Tip: set Inspect target to Micromarkets or Localities, then click a polygon.
+                Tip: set Inspect target to Micromarkets or Localities, then click a polygon. Press Esc to clear.
               </div>
             ) : (
               <div style={{ marginTop: 8, fontSize: 12, opacity: 0.92, display: "grid", gap: 6 }}>
@@ -791,16 +964,21 @@ export default function MapView() {
                   Name: <span style={{ fontWeight: 600 }}>{pinned.displayName}</span>
                 </div>
                 <div>
-                  Join key: <span style={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" }}>{pinned.joinKey}</span>
+                  Join key:{" "}
+                  <span style={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" }}>
+                    {pinned.joinKey}
+                  </span>
                 </div>
                 <div>
                   Month value (psf):{" "}
                   <span style={{ fontWeight: 600 }}>
-                    {pinnedCurrent?.v !== undefined && typeof pinnedCurrent?.v === "number" ? fmtMoney(pinnedCurrent.v) : "-"}
-                  </span>
-                  {"  "}
+                    {pinnedCurrent?.v !== undefined && typeof pinnedCurrent?.v === "number"
+                      ? fmtMoney(pinnedCurrent.v)
+                      : "-"}
+                  </span>{" "}
                   <span style={{ opacity: 0.85 }}>
-                    (n: {pinnedCurrent?.n !== undefined && typeof pinnedCurrent?.n === "number" ? pinnedCurrent.n : "-"})
+                    (n:{" "}
+                    {pinnedCurrent?.n !== undefined && typeof pinnedCurrent?.n === "number" ? pinnedCurrent.n : "-"})
                   </span>
                 </div>
 
@@ -810,9 +988,15 @@ export default function MapView() {
                     <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
                       <thead>
                         <tr style={{ position: "sticky", top: 0, background: "white" }}>
-                          <th style={{ textAlign: "left", padding: "8px 10px", borderBottom: "1px solid #e5e7eb" }}>Month</th>
-                          <th style={{ textAlign: "right", padding: "8px 10px", borderBottom: "1px solid #e5e7eb" }}>psf</th>
-                          <th style={{ textAlign: "right", padding: "8px 10px", borderBottom: "1px solid #e5e7eb" }}>n</th>
+                          <th style={{ textAlign: "left", padding: "8px 10px", borderBottom: "1px solid #e5e7eb" }}>
+                            Month
+                          </th>
+                          <th style={{ textAlign: "right", padding: "8px 10px", borderBottom: "1px solid #e5e7eb" }}>
+                            psf
+                          </th>
+                          <th style={{ textAlign: "right", padding: "8px 10px", borderBottom: "1px solid #e5e7eb" }}>
+                            n
+                          </th>
                         </tr>
                       </thead>
                       <tbody>
@@ -823,10 +1007,14 @@ export default function MapView() {
                               <td style={{ padding: "8px 10px", borderBottom: "1px solid #f3f4f6" }}>
                                 {parseMonthLabel(r.month)}
                               </td>
-                              <td style={{ padding: "8px 10px", textAlign: "right", borderBottom: "1px solid #f3f4f6" }}>
+                              <td
+                                style={{ padding: "8px 10px", textAlign: "right", borderBottom: "1px solid #f3f4f6" }}
+                              >
                                 {typeof r.v === "number" ? fmtMoney(r.v) : "-"}
                               </td>
-                              <td style={{ padding: "8px 10px", textAlign: "right", borderBottom: "1px solid #f3f4f6" }}>
+                              <td
+                                style={{ padding: "8px 10px", textAlign: "right", borderBottom: "1px solid #f3f4f6" }}
+                              >
                                 {typeof r.n === "number" ? r.n : "-"}
                               </td>
                             </tr>
@@ -948,8 +1136,12 @@ export default function MapView() {
           <div>
             Choropleth join keys:
             <ul style={{ margin: "6px 0 0 18px" }}>
-              <li>Micromarkets: join by polygon <code>featureId</code> (matches JSON keys)</li>
-              <li>Localities: join by <code>properties.LocalityName</code> (matches JSON keys)</li>
+              <li>
+                Micromarkets: join by polygon <code>featureId</code> (matches JSON keys)
+              </li>
+              <li>
+                Localities: join by <code>properties.LocalityName</code> (matches JSON keys)
+              </li>
               <li>Projects: (later) can support point metrics similarly</li>
             </ul>
           </div>
