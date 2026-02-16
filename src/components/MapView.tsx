@@ -69,6 +69,12 @@ export default function MapView() {
   const [clickInfo, setClickInfo] = useState<PickInfo | null>(null);
 
   const [inspectTarget, setInspectTarget] = useState<InspectTarget>("localities");
+    // --- FIX: keep latest inspectTarget for map event handlers (avoids stale closure)
+  const inspectTargetRef = useRef<InspectTarget>("localities");
+
+  useEffect(() => {
+    inspectTargetRef.current = inspectTarget;
+  }, [inspectTarget]);
   const [showLocalities, setShowLocalities] = useState(true);
   const [showMicromarkets, setShowMicromarkets] = useState(true);
   const [showProjects, setShowProjects] = useState(true);
@@ -254,7 +260,7 @@ export default function MapView() {
         const m = mapRef.current;
         if (!m) return;
 
-        const layer = targetToLayerId(inspectTarget);
+        const layer = targetToLayerId(inspectTargetRef.current);
         const features = m.queryRenderedFeatures(e.point, { layers: [layer] });
 
         if (!features.length) {
@@ -281,7 +287,7 @@ export default function MapView() {
         const m = mapRef.current;
         if (!m) return;
 
-        const layer = targetToLayerId(inspectTarget);
+        const layer = targetToLayerId(inspectTargetRef.current);
         const features = m.queryRenderedFeatures(e.point, { layers: [layer] });
 
         if (!features.length) {
