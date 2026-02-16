@@ -33,6 +33,14 @@ type MetricsDoc = {
   notes?: string[];
 };
 
+type PinnedSelection = {
+  level: ChoroplethLevel;
+  joinKey: string;
+  displayName: string;
+  featureId: unknown;
+  lngLat: { lng: number; lat: number };
+};
+
 const DEFAULT_CENTER: [number, number] = [72.8777, 19.076]; // Mumbai
 const DEFAULT_ZOOM = 10.5;
 
@@ -62,6 +70,11 @@ function parseMonthLabel(yyyyMm01: string) {
   const d = new Date(yyyyMm01 + "T00:00:00Z");
   if (Number.isNaN(d.getTime())) return yyyyMm01;
   return d.toLocaleString("en-US", { month: "short", year: "numeric" });
+}
+
+function getStrProp(props: Record<string, unknown> | null | undefined, key: string): string {
+  const v = props?.[key];
+  return typeof v === "string" ? v : "";
 }
 
 export default function MapView() {
@@ -102,6 +115,9 @@ export default function MapView() {
     count: number;
     missing: number;
   }>({ min: null, max: null, count: 0, missing: 0 });
+
+  // V2 pinned selection (only for micromarkets/localities polygons)
+  const [pinned, setPinned] = useState<PinnedSelection | null>(null);
 
   const token = process.env.NEXT_PUBLIC_MAPBOX_TOKEN;
 
@@ -249,7 +265,6 @@ export default function MapView() {
 
       // -----------------------------
       // HIT layers (transparent, on top)
-      // These make hover/click reliable for thin lines / small points / occluded polygons.
       // -----------------------------
       map.addLayer({
         id: HIT_LAYERS.city,
@@ -333,6 +348,7 @@ export default function MapView() {
 
         const f = features[0];
         const props = (f.properties ?? {}) as Record<string, unknown>;
+
         setClickInfo({
           layerId: f.layer.id,
           sourceLayer: (f.layer as any)["source-layer"] ?? "",
@@ -341,6 +357,36 @@ export default function MapView() {
           properties: props,
           lngLat: { lng: e.lngLat.lng, lat: e.lngLat.lat },
         });
+
+        // V2: Pinned selection only for polygon levels
+        const fid = (f as any).id ?? null;
+
+        if (layer === HIT_LAYERS.micromarkets && fid !== null) {
+          const name =
+            getStrProp(props, "MicroMarketName") ||
+            getStrProp(props, "MicromarketName") ||
+            getStrProp(props, "Micromarket") ||
+            `Micromarket ${String(fid)}`;
+
+          setPinned({
+            level: "micromarkets",
+            joinKey: String(fid),
+            displayName: name,
+            featureId: fid,
+            lngLat: { lng: e.lngLat.lng, lat: e.lngLat.lat },
+          });
+        } else if (layer === HIT_LAYERS.localities && fid !== null) {
+          const lname = getStrProp(props, "LocalityName") || "";
+          if (lname) {
+            setPinned({
+              level: "localities",
+              joinKey: lname,
+              displayName: lname,
+              featureId: fid,
+              lngLat: { lng: e.lngLat.lng, lat: e.lngLat.lat },
+            });
+          }
+        }
       };
 
       map.on("mousemove", onMove);
@@ -584,6 +630,35 @@ export default function MapView() {
     }
   }, [monthOptions, metricMonth]);
 
+  // -----------------------------
+  // V2 pinned details computed values
+  // -----------------------------
+  const pinnedDoc = useMemo(() => {
+    if (!pinned) return null;
+    return pinned.level === "micromarkets" ? mmDoc : locDoc;
+  }, [pinned, mmDoc, locDoc]);
+
+  const pinnedCurrent = useMemo(() => {
+    if (!pinned || !pinnedDoc || !metricMonth) return null;
+    const monthMap = pinnedDoc.byMonth?.[metricMonth];
+    if (!monthMap) return null;
+    return monthMap[pinned.joinKey] ?? null;
+  }, [pinned, pinnedDoc, metricMonth]);
+
+  const pinnedSeries = useMemo(() => {
+    if (!pinned || !pinnedDoc) return [];
+    const months = pinnedDoc.months ?? [];
+    const rows = months.map((m) => {
+      const bucket = pinnedDoc.byMonth?.[m]?.[pinned.joinKey];
+      return {
+        month: m,
+        v: typeof bucket?.v === "number" ? bucket.v : null,
+        n: typeof bucket?.n === "number" ? bucket.n : null,
+      };
+    });
+    return rows;
+  }, [pinned, pinnedDoc]);
+
   return (
     <div style={{ display: "grid", gridTemplateColumns: "1fr 420px", height: "100vh" }}>
       <div ref={containerRef} style={{ width: "100%", height: "100%" }} />
@@ -681,6 +756,100 @@ export default function MapView() {
               ))}
             </div>
           </div>
+
+          {/* V2 Pinned details */}
+          <div style={{ marginTop: 12, paddingTop: 10, borderTop: "1px solid #e5e7eb" }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+              <div style={{ fontWeight: 600 }}>Pinned (click a Micromarket/Locality polygon)</div>
+              <button
+                onClick={() => setPinned(null)}
+                style={{
+                  fontSize: 12,
+                  padding: "6px 8px",
+                  border: "1px solid #e5e7eb",
+                  borderRadius: 6,
+                  background: "white",
+                  cursor: "pointer",
+                }}
+                disabled={!pinned}
+                title={!pinned ? "Nothing pinned" : "Clear pinned selection"}
+              >
+                Clear
+              </button>
+            </div>
+
+            {!pinned ? (
+              <div style={{ fontSize: 12, opacity: 0.75, marginTop: 6 }}>
+                Tip: set Inspect target to Micromarkets or Localities, then click a polygon.
+              </div>
+            ) : (
+              <div style={{ marginTop: 8, fontSize: 12, opacity: 0.92, display: "grid", gap: 6 }}>
+                <div>
+                  Level: <span style={{ fontWeight: 600 }}>{pinned.level}</span>
+                </div>
+                <div>
+                  Name: <span style={{ fontWeight: 600 }}>{pinned.displayName}</span>
+                </div>
+                <div>
+                  Join key: <span style={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" }}>{pinned.joinKey}</span>
+                </div>
+                <div>
+                  Month value (psf):{" "}
+                  <span style={{ fontWeight: 600 }}>
+                    {pinnedCurrent?.v !== undefined && typeof pinnedCurrent?.v === "number" ? fmtMoney(pinnedCurrent.v) : "-"}
+                  </span>
+                  {"  "}
+                  <span style={{ opacity: 0.85 }}>
+                    (n: {pinnedCurrent?.n !== undefined && typeof pinnedCurrent?.n === "number" ? pinnedCurrent.n : "-"})
+                  </span>
+                </div>
+
+                <div style={{ marginTop: 6, fontWeight: 600 }}>Time series</div>
+                <div style={{ border: "1px solid #e5e7eb", borderRadius: 8, overflow: "hidden" }}>
+                  <div style={{ maxHeight: 220, overflow: "auto" }}>
+                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                      <thead>
+                        <tr style={{ position: "sticky", top: 0, background: "white" }}>
+                          <th style={{ textAlign: "left", padding: "8px 10px", borderBottom: "1px solid #e5e7eb" }}>Month</th>
+                          <th style={{ textAlign: "right", padding: "8px 10px", borderBottom: "1px solid #e5e7eb" }}>psf</th>
+                          <th style={{ textAlign: "right", padding: "8px 10px", borderBottom: "1px solid #e5e7eb" }}>n</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {pinnedSeries.map((r) => {
+                          const isActive = r.month === metricMonth;
+                          return (
+                            <tr key={r.month} style={{ background: isActive ? "#F9FAFB" : "transparent" }}>
+                              <td style={{ padding: "8px 10px", borderBottom: "1px solid #f3f4f6" }}>
+                                {parseMonthLabel(r.month)}
+                              </td>
+                              <td style={{ padding: "8px 10px", textAlign: "right", borderBottom: "1px solid #f3f4f6" }}>
+                                {typeof r.v === "number" ? fmtMoney(r.v) : "-"}
+                              </td>
+                              <td style={{ padding: "8px 10px", textAlign: "right", borderBottom: "1px solid #f3f4f6" }}>
+                                {typeof r.n === "number" ? r.n : "-"}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                {pinnedDoc?.notes?.length ? (
+                  <div style={{ marginTop: 6, fontSize: 12, opacity: 0.85 }}>
+                    Notes:
+                    <ul style={{ margin: "6px 0 0 18px" }}>
+                      {pinnedDoc.notes.map((n, idx) => (
+                        <li key={idx}>{n}</li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
+              </div>
+            )}
+          </div>
         </div>
 
         {/* V0 Controls */}
@@ -775,7 +944,7 @@ export default function MapView() {
         <hr style={{ margin: "12px 0" }} />
 
         <div style={{ fontSize: 12, opacity: 0.85 }}>
-          <div style={{ fontWeight: 600, marginBottom: 6 }}>V1 goal right now</div>
+          <div style={{ fontWeight: 600, marginBottom: 6 }}>Notes</div>
           <div>
             Choropleth join keys:
             <ul style={{ margin: "6px 0 0 18px" }}>
