@@ -15,6 +15,8 @@ type PickInfo = {
 
 type InspectTarget = "localities" | "micromarkets" | "projects" | "roads" | "city";
 
+type LightPreset = "dawn" | "day" | "dusk" | "night";
+
 const DEFAULT_CENTER: [number, number] = [72.8777, 19.0760]; // Mumbai
 const DEFAULT_ZOOM = 10.5;
 
@@ -39,6 +41,10 @@ export default function MapView() {
   const [showProjects, setShowProjects] = useState(true);
   const [showRoads, setShowRoads] = useState(true);
 
+  // V0 controls
+  const [lightPreset, setLightPreset] = useState<LightPreset>("day");
+  const [enable3D, setEnable3D] = useState(false);
+
   const token = process.env.NEXT_PUBLIC_MAPBOX_TOKEN;
 
   const vectorSources = useMemo(() => {
@@ -61,6 +67,7 @@ export default function MapView() {
 
     mapboxgl.accessToken = token;
 
+    // Use Standard style + config so the initial light preset is applied at creation.
     const map = new mapboxgl.Map({
       container: containerRef.current,
       style: "mapbox://styles/mapbox/standard",
@@ -69,6 +76,11 @@ export default function MapView() {
       pitch: 0,
       bearing: 0,
       antialias: true,
+      config: {
+        basemap: {
+          lightPreset,
+        },
+      },
     });
 
     mapRef.current = map;
@@ -137,21 +149,21 @@ export default function MapView() {
         paint: { "circle-radius": 3, "circle-opacity": 0.75 },
       });
 
-      // Event handlers use dynamic layer selection based on inspectTarget (set below)
+      // Inspector handlers
       const onMove = (e: MapMouseEvent) => {
-        const map = mapRef.current;
-        if (!map) return;
+        const m = mapRef.current;
+        if (!m) return;
 
         const layer = targetToLayerId(inspectTarget);
-        const features = map.queryRenderedFeatures(e.point, { layers: [layer] });
+        const features = m.queryRenderedFeatures(e.point, { layers: [layer] });
 
         if (!features.length) {
-          map.getCanvas().style.cursor = "";
+          m.getCanvas().style.cursor = "";
           setHoverInfo(null);
           return;
         }
 
-        map.getCanvas().style.cursor = "pointer";
+        m.getCanvas().style.cursor = "pointer";
 
         const f = features[0];
         const props = (f.properties ?? {}) as Record<string, unknown>;
@@ -166,15 +178,17 @@ export default function MapView() {
       };
 
       const onClick = (e: MapMouseEvent) => {
-        const map = mapRef.current;
-        if (!map) return;
+        const m = mapRef.current;
+        if (!m) return;
 
         const layer = targetToLayerId(inspectTarget);
-        const features = map.queryRenderedFeatures(e.point, { layers: [layer] });
+        const features = m.queryRenderedFeatures(e.point, { layers: [layer] });
+
         if (!features.length) {
           setClickInfo(null);
           return;
         }
+
         const f = features[0];
         const props = (f.properties ?? {}) as Record<string, unknown>;
         setClickInfo({
@@ -195,7 +209,8 @@ export default function MapView() {
       map.remove();
       mapRef.current = null;
     };
-  }, [token, vectorSources, inspectTarget]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token, vectorSources]); // do not include lightPreset here; we update it via effect below
 
   // Apply layer visibility when toggles change
   useEffect(() => {
@@ -212,12 +227,91 @@ export default function MapView() {
     setLayerVisibility(map, "roads-line", showRoads);
   }, [showLocalities, showMicromarkets, showProjects, showRoads]);
 
+  // Apply light preset at runtime (Standard style config)
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    try {
+      map.setConfigProperty("basemap", "lightPreset", lightPreset);
+    } catch (e) {
+      // If style isn't ready yet, this can throw; it's safe to ignore.
+      // The initial config passed at map creation already set the preset.
+      console.warn("setConfigProperty failed (safe to ignore during init):", e);
+    }
+  }, [lightPreset]);
+
+  // Apply 2D/3D toggle (pitch + optional terrain)
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+
+    if (enable3D) {
+      // Add DEM source once (Mapbox terrain DEM)
+      const demSourceId = "mapbox-dem";
+      if (!map.getSource(demSourceId)) {
+        map.addSource(demSourceId, {
+          type: "raster-dem",
+          url: "mapbox://mapbox.mapbox-terrain-dem-v1",
+          tileSize: 512,
+          maxzoom: 14,
+        });
+      }
+
+      try {
+        map.setTerrain({ source: demSourceId, exaggeration: 1.3 });
+      } catch (e) {
+        console.warn("setTerrain failed:", e);
+      }
+
+      map.easeTo({
+        pitch: 60,
+        bearing: -20,
+        duration: 600,
+      });
+    } else {
+      try {
+        map.setTerrain(null as any);
+      } catch {
+        // ignore if terrain isn't supported/active
+      }
+      map.easeTo({
+        pitch: 0,
+        bearing: 0,
+        duration: 600,
+      });
+    }
+  }, [enable3D]);
+
   return (
     <div style={{ display: "grid", gridTemplateColumns: "1fr 420px", height: "100vh" }}>
       <div ref={containerRef} style={{ width: "100%", height: "100%" }} />
 
       <div style={{ borderLeft: "1px solid #e5e7eb", padding: 12, overflow: "auto" }}>
         <h3 style={{ margin: "0 0 8px 0" }}>Inspector</h3>
+
+        {/* V0 Controls */}
+        <div style={{ marginBottom: 12 }}>
+          <div style={{ fontWeight: 600, marginBottom: 6 }}>Map controls</div>
+
+          <div style={{ marginBottom: 8 }}>
+            <div style={{ fontSize: 12, opacity: 0.85, marginBottom: 4 }}>Light preset</div>
+            <select
+              value={lightPreset}
+              onChange={(e) => setLightPreset(e.target.value as LightPreset)}
+              style={{ width: "100%", padding: 8 }}
+            >
+              <option value="dawn">Dawn</option>
+              <option value="day">Day</option>
+              <option value="dusk">Dusk</option>
+              <option value="night">Night</option>
+            </select>
+          </div>
+
+          <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <input type="checkbox" checked={enable3D} onChange={(e) => setEnable3D(e.target.checked)} />
+            3D view (pitch + terrain)
+          </label>
+        </div>
 
         <div style={{ marginBottom: 10 }}>
           <div style={{ fontWeight: 600, marginBottom: 6 }}>Inspect target</div>
@@ -299,9 +393,9 @@ export default function MapView() {
           <div>
             Confirm join keys by inspecting properties:
             <ul style={{ margin: "6px 0 0 18px" }}>
-              <li>Localities: must expose <code>LocalityID</code> (or equivalent)</li>
-              <li>Micromarkets: must expose <code>MicroMarketID</code> (or equivalent)</li>
-              <li>Projects: already exposes IDs (good)</li>
+              <li>Micromarkets: join via polygon featureId (works)</li>
+              <li>Localities: needs lookup via (CityID + LocalityName) or tileset rebuild</li>
+              <li>Projects: IDs present (works)</li>
             </ul>
           </div>
         </div>
