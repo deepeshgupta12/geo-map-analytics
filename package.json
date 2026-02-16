@@ -10,6 +10,7 @@
     "tileset:layers": "node scripts/tileset_layers.mjs"
   },
   "dependencies": {
+    "dotenv": "^17.3.1",
     "mapbox-gl": "^3.18.1",
     "next": "16.1.6",
     "react": "19.2.3",

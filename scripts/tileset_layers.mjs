@@ -1,4 +1,7 @@
 // scripts/tileset_layers.mjs
+import dotenv from "dotenv";
+dotenv.config({ path: ".env.local" }); // load Next env file for Node scripts
+
 const token = process.env.NEXT_PUBLIC_MAPBOX_TOKEN || process.env.MAPBOX_TOKEN;
 
 if (!token) {
