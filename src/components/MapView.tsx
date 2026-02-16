@@ -11,6 +11,8 @@ type PickInfo = {
   lngLat: { lng: number; lat: number };
 };
 
+type InspectTarget = "localities" | "micromarkets" | "projects" | "roads" | "city";
+
 const DEFAULT_CENTER: [number, number] = [72.8777, 19.0760]; // Mumbai
 const DEFAULT_ZOOM = 10.5;
 
@@ -29,10 +31,15 @@ export default function MapView() {
   const [hoverInfo, setHoverInfo] = useState<PickInfo | null>(null);
   const [clickInfo, setClickInfo] = useState<PickInfo | null>(null);
 
+  const [inspectTarget, setInspectTarget] = useState<InspectTarget>("localities");
+  const [showLocalities, setShowLocalities] = useState(true);
+  const [showMicromarkets, setShowMicromarkets] = useState(true);
+  const [showProjects, setShowProjects] = useState(true);
+  const [showRoads, setShowRoads] = useState(true);
+
   const token = process.env.NEXT_PUBLIC_MAPBOX_TOKEN;
 
   const vectorSources = useMemo(() => {
-    // Mapbox vector tileset URL format
     return {
       city: `mapbox://${TILESETS.city.id}`,
       micromarkets: `mapbox://${TILESETS.micromarkets.id}`,
@@ -44,20 +51,16 @@ export default function MapView() {
 
   useEffect(() => {
     if (!containerRef.current) return;
-
     if (!token) {
       console.error("Missing NEXT_PUBLIC_MAPBOX_TOKEN in .env.local");
       return;
     }
-
-    // Prevent double init in dev hot-reload
     if (mapRef.current) return;
 
     mapboxgl.accessToken = token;
 
     const map = new mapboxgl.Map({
       container: containerRef.current,
-      // Mapbox Standard style (latest direction)
       style: "mapbox://styles/mapbox/standard",
       center: DEFAULT_CENTER,
       zoom: DEFAULT_ZOOM,
@@ -67,20 +70,17 @@ export default function MapView() {
     });
 
     mapRef.current = map;
-
     map.addControl(new mapboxgl.NavigationControl({ visualizePitch: true }), "top-right");
 
     map.on("load", () => {
-      // --- Sources ---
+      // Sources
       map.addSource("city-src", { type: "vector", url: vectorSources.city });
       map.addSource("micromarkets-src", { type: "vector", url: vectorSources.micromarkets });
       map.addSource("localities-src", { type: "vector", url: vectorSources.localities });
       map.addSource("roads-src", { type: "vector", url: vectorSources.roads });
       map.addSource("projects-src", { type: "vector", url: vectorSources.projects });
 
-      // --- Layers (start with simple outlines/fills so we can inspect features) ---
-
-      // City outline
+      // Layers
       map.addLayer({
         id: "city-outline",
         type: "line",
@@ -89,7 +89,6 @@ export default function MapView() {
         paint: { "line-width": 2 },
       });
 
-      // Micromarkets fill (light) + outline
       map.addLayer({
         id: "micromarkets-fill",
         type: "fill",
@@ -105,7 +104,6 @@ export default function MapView() {
         paint: { "line-width": 1 },
       });
 
-      // Localities fill (lighter) + outline
       map.addLayer({
         id: "localities-fill",
         type: "fill",
@@ -121,7 +119,6 @@ export default function MapView() {
         paint: { "line-width": 0.7 },
       });
 
-      // Roads
       map.addLayer({
         id: "roads-line",
         type: "line",
@@ -130,34 +127,28 @@ export default function MapView() {
         paint: { "line-width": 1.2 },
       });
 
-      // Projects
       map.addLayer({
         id: "projects-circle",
         type: "circle",
         source: "projects-src",
         "source-layer": TILESETS.projects.sourceLayer,
-        paint: {
-          "circle-radius": 3,
-          "circle-opacity": 0.75,
-        },
+        paint: { "circle-radius": 3, "circle-opacity": 0.75 },
       });
 
-      // --- Hover and Click inspection ---
-      const inspectLayerIds = [
-        "localities-fill",
-        "micromarkets-fill",
-        "projects-circle",
-        "roads-line",
-        "city-outline",
-      ];
-
+      // Event handlers use dynamic layer selection based on inspectTarget (set below)
       const onMove = (e: MapMouseEvent) => {
-        const features = map.queryRenderedFeatures(e.point, { layers: inspectLayerIds });
+        const map = mapRef.current;
+        if (!map) return;
+
+        const layer = targetToLayerId(inspectTarget);
+        const features = map.queryRenderedFeatures(e.point, { layers: [layer] });
+
         if (!features.length) {
           map.getCanvas().style.cursor = "";
           setHoverInfo(null);
           return;
         }
+
         map.getCanvas().style.cursor = "pointer";
 
         const f = features[0];
@@ -170,7 +161,11 @@ export default function MapView() {
       };
 
       const onClick = (e: MapMouseEvent) => {
-        const features = map.queryRenderedFeatures(e.point, { layers: inspectLayerIds });
+        const map = mapRef.current;
+        if (!map) return;
+
+        const layer = targetToLayerId(inspectTarget);
+        const features = map.queryRenderedFeatures(e.point, { layers: [layer] });
         if (!features.length) {
           setClickInfo(null);
           return;
@@ -192,7 +187,22 @@ export default function MapView() {
       map.remove();
       mapRef.current = null;
     };
-  }, [token, vectorSources]);
+  }, [token, vectorSources, inspectTarget]);
+
+  // Apply layer visibility when toggles change
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+
+    setLayerVisibility(map, "localities-fill", showLocalities);
+    setLayerVisibility(map, "localities-outline", showLocalities);
+
+    setLayerVisibility(map, "micromarkets-fill", showMicromarkets);
+    setLayerVisibility(map, "micromarkets-outline", showMicromarkets);
+
+    setLayerVisibility(map, "projects-circle", showProjects);
+    setLayerVisibility(map, "roads-line", showRoads);
+  }, [showLocalities, showMicromarkets, showProjects, showRoads]);
 
   return (
     <div style={{ display: "grid", gridTemplateColumns: "1fr 420px", height: "100vh" }}>
@@ -201,12 +211,65 @@ export default function MapView() {
       <div style={{ borderLeft: "1px solid #e5e7eb", padding: 12, overflow: "auto" }}>
         <h3 style={{ margin: "0 0 8px 0" }}>Inspector</h3>
 
+        <div style={{ marginBottom: 10 }}>
+          <div style={{ fontWeight: 600, marginBottom: 6 }}>Inspect target</div>
+          <select
+            value={inspectTarget}
+            onChange={(e) => {
+              setHoverInfo(null);
+              setClickInfo(null);
+              setInspectTarget(e.target.value as InspectTarget);
+            }}
+            style={{ width: "100%", padding: 8 }}
+          >
+            <option value="localities">Localities (polygons)</option>
+            <option value="micromarkets">Micromarkets (polygons)</option>
+            <option value="projects">Projects (points)</option>
+            <option value="roads">Roads (lines)</option>
+            <option value="city">City (outline)</option>
+          </select>
+        </div>
+
+        <div style={{ marginBottom: 12 }}>
+          <div style={{ fontWeight: 600, marginBottom: 6 }}>Layer visibility</div>
+
+          <label style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 6 }}>
+            <input
+              type="checkbox"
+              checked={showLocalities}
+              onChange={(e) => setShowLocalities(e.target.checked)}
+            />
+            Localities
+          </label>
+
+          <label style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 6 }}>
+            <input
+              type="checkbox"
+              checked={showMicromarkets}
+              onChange={(e) => setShowMicromarkets(e.target.checked)}
+            />
+            Micromarkets
+          </label>
+
+          <label style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 6 }}>
+            <input
+              type="checkbox"
+              checked={showProjects}
+              onChange={(e) => setShowProjects(e.target.checked)}
+            />
+            Projects
+          </label>
+
+          <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <input type="checkbox" checked={showRoads} onChange={(e) => setShowRoads(e.target.checked)} />
+            Roads
+          </label>
+        </div>
+
         <div style={{ marginBottom: 12 }}>
           <div style={{ fontWeight: 600 }}>Hover</div>
           {hoverInfo ? (
-            <pre style={{ fontSize: 12, whiteSpace: "pre-wrap" }}>
-              {safeJson(hoverInfo)}
-            </pre>
+            <pre style={{ fontSize: 12, whiteSpace: "pre-wrap" }}>{safeJson(hoverInfo)}</pre>
           ) : (
             <div style={{ fontSize: 12, opacity: 0.7 }}>Hover a feature on the map…</div>
           )}
@@ -215,9 +278,7 @@ export default function MapView() {
         <div>
           <div style={{ fontWeight: 600 }}>Click (Pinned)</div>
           {clickInfo ? (
-            <pre style={{ fontSize: 12, whiteSpace: "pre-wrap" }}>
-              {safeJson(clickInfo)}
-            </pre>
+            <pre style={{ fontSize: 12, whiteSpace: "pre-wrap" }}>{safeJson(clickInfo)}</pre>
           ) : (
             <div style={{ fontSize: 12, opacity: 0.7 }}>Click a feature to pin its properties…</div>
           )}
@@ -226,18 +287,37 @@ export default function MapView() {
         <hr style={{ margin: "12px 0" }} />
 
         <div style={{ fontSize: 12, opacity: 0.85 }}>
-          <div style={{ fontWeight: 600, marginBottom: 6 }}>V0 Goal right now</div>
+          <div style={{ fontWeight: 600, marginBottom: 6 }}>V0 goal right now</div>
           <div>
-            Confirm join keys by inspecting polygon properties:
+            Confirm join keys by inspecting properties:
             <ul style={{ margin: "6px 0 0 18px" }}>
-              <li>Localities: look for something like <code>sublocationid</code></li>
-              <li>Micromarkets: look for something like <code>locationid</code></li>
-              <li>City: <code>cityid</code></li>
-              <li>Projects: <code>projectid</code> + locality/micromarket ids</li>
+              <li>Localities: must expose <code>LocalityID</code> (or equivalent)</li>
+              <li>Micromarkets: must expose <code>MicroMarketID</code> (or equivalent)</li>
+              <li>Projects: already exposes IDs (good)</li>
             </ul>
           </div>
         </div>
       </div>
     </div>
   );
+}
+
+function targetToLayerId(target: InspectTarget) {
+  switch (target) {
+    case "localities":
+      return "localities-fill";
+    case "micromarkets":
+      return "micromarkets-fill";
+    case "projects":
+      return "projects-circle";
+    case "roads":
+      return "roads-line";
+    case "city":
+      return "city-outline";
+  }
+}
+
+function setLayerVisibility(map: Map, layerId: string, visible: boolean) {
+  if (!map.getLayer(layerId)) return;
+  map.setLayoutProperty(layerId, "visibility", visible ? "visible" : "none");
 }
