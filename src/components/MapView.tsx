@@ -64,8 +64,14 @@ const PIN_LAYERS = {
 type LayerWithSourceLayer = AnyLayer & { "source-layer"?: string };
 type FeatureId = string | number;
 
+function getLayerId(f: MapboxGeoJSONFeature): string {
+  // Mapbox types mark `layer` as optional; runtime often has it, but we must guard for TS.
+  return f.layer?.id ?? "";
+}
+
 function getSourceLayer(f: MapboxGeoJSONFeature): string {
-  return (f.layer as LayerWithSourceLayer)["source-layer"] ?? "";
+  const layer = f.layer as LayerWithSourceLayer | undefined;
+  return layer?.["source-layer"] ?? "";
 }
 
 function toFeatureId(v: unknown): FeatureId | null {
@@ -253,12 +259,11 @@ export default function MapView() {
 
         if (nextIdx >= monthOptions.length) {
           if (!loopPlay) {
-            // stop at end (keep last month selected)
             window.clearInterval(id);
             setIsPlaying(false);
             return monthOptions[monthOptions.length - 1];
           }
-          nextIdx = 0; // loop
+          nextIdx = 0;
         }
 
         return monthOptions[nextIdx];
@@ -270,7 +275,6 @@ export default function MapView() {
     };
   }, [isPlaying, monthOptions, playSpeedMs, loopPlay, enableChoropleth]);
 
-  // Utility: stop playback (used by map interaction handlers + UI)
   const stopPlayback = () => {
     if (isPlayingRef.current) setIsPlaying(false);
   };
@@ -303,14 +307,12 @@ export default function MapView() {
     map.addControl(new mapboxgl.NavigationControl({ visualizePitch: true }), "top-right");
 
     map.on("load", () => {
-      // Sources
       map.addSource("city-src", { type: "vector", url: vectorSources.city });
       map.addSource("micromarkets-src", { type: "vector", url: vectorSources.micromarkets });
       map.addSource("localities-src", { type: "vector", url: vectorSources.localities });
       map.addSource("roads-src", { type: "vector", url: vectorSources.roads });
       map.addSource("projects-src", { type: "vector", url: vectorSources.projects });
 
-      // Visible layers
       map.addLayer({
         id: "city-outline",
         type: "line",
@@ -365,9 +367,7 @@ export default function MapView() {
         paint: { "circle-radius": 3, "circle-opacity": 0.75 },
       });
 
-      // -----------------------------
-      // HIT layers (transparent, on top)
-      // -----------------------------
+      // HIT layers
       map.addLayer({
         id: HIT_LAYERS.city,
         type: "line",
@@ -408,19 +408,14 @@ export default function MapView() {
         paint: { "circle-radius": 10, "circle-opacity": 0 },
       });
 
-      // -----------------------------
-      // Pinned highlight layers (full polygon outline via filter)
-      // -----------------------------
+      // Pinned highlight layers
       map.addLayer({
         id: PIN_LAYERS.micromarkets,
         type: "line",
         source: "micromarkets-src",
         "source-layer": TILESETS.micromarkets.sourceLayer,
-        filter: ["==", ["id"], -999999], // updated at runtime
-        paint: {
-          "line-color": "#F59E0B",
-          "line-width": 3,
-        },
+        filter: ["==", ["id"], -999999],
+        paint: { "line-color": "#F59E0B", "line-width": 3 },
       });
 
       map.addLayer({
@@ -428,14 +423,11 @@ export default function MapView() {
         type: "line",
         source: "localities-src",
         "source-layer": TILESETS.localities.sourceLayer,
-        filter: ["==", ["get", "LocalityName"], "__nope__"], // updated at runtime
-        paint: {
-          "line-color": "#F59E0B",
-          "line-width": 3,
-        },
+        filter: ["==", ["get", "LocalityName"], "__nope__"],
+        paint: { "line-color": "#F59E0B", "line-width": 3 },
       });
 
-      // Stop playback on map interactions (user intent)
+      // Stop playback on map interactions
       const stop = () => stopPlayback();
       map.on("dragstart", stop);
       map.on("zoomstart", stop);
@@ -445,7 +437,6 @@ export default function MapView() {
       map.on("mousedown", stop);
       map.on("touchstart", stop);
 
-      // Inspector handlers
       const onMove = (e: MapMouseEvent) => {
         const m = mapRef.current;
         if (!m) return;
@@ -463,8 +454,9 @@ export default function MapView() {
 
         const f = features[0];
         const props = (f.properties ?? {}) as Record<string, unknown>;
+
         setHoverInfo({
-          layerId: f.layer.id,
+          layerId: getLayerId(f),
           sourceLayer: getSourceLayer(f),
           featureId: f.id ?? null,
           propertyKeys: Object.keys(props),
@@ -491,7 +483,7 @@ export default function MapView() {
         const props = (f.properties ?? {}) as Record<string, unknown>;
 
         setClickInfo({
-          layerId: f.layer.id,
+          layerId: getLayerId(f),
           sourceLayer: getSourceLayer(f),
           featureId: f.id ?? null,
           propertyKeys: Object.keys(props),
@@ -499,7 +491,6 @@ export default function MapView() {
           lngLat: { lng: e.lngLat.lng, lat: e.lngLat.lat },
         });
 
-        // V2: Pinned selection only for polygon levels
         const fid = toFeatureId(f.id);
 
         if (layer === HIT_LAYERS.micromarkets && fid !== null) {
@@ -533,7 +524,6 @@ export default function MapView() {
       map.on("mousemove", onMove);
       map.on("click", onClick);
 
-      // ESC clears pinned (and stops playback)
       const onKeyDown = (ev: KeyboardEvent) => {
         if (ev.key === "Escape") {
           stopPlayback();
@@ -542,7 +532,6 @@ export default function MapView() {
       };
       window.addEventListener("keydown", onKeyDown);
 
-      // Cleanup listeners when map removed
       map.once("remove", () => {
         window.removeEventListener("keydown", onKeyDown);
         map.off("dragstart", stop);
@@ -574,7 +563,6 @@ export default function MapView() {
     if (!map.getLayer(PIN_LAYERS.micromarkets) || !map.getLayer(PIN_LAYERS.localities)) return;
 
     if (!pinned) {
-      // reset filters to match nothing
       map.setFilter(PIN_LAYERS.micromarkets, ["==", ["id"], -999999]);
       map.setFilter(PIN_LAYERS.localities, ["==", ["get", "LocalityName"], "__nope__"]);
       return;
@@ -597,27 +585,22 @@ export default function MapView() {
     const map = mapRef.current;
     if (!map) return;
 
-    // Localities
     setLayerVisibility(map, "localities-fill", showLocalities);
     setLayerVisibility(map, "localities-outline", showLocalities);
     setLayerVisibility(map, HIT_LAYERS.localities, showLocalities);
-    setLayerVisibility(map, PIN_LAYERS.localities, showLocalities); // pinned outline
+    setLayerVisibility(map, PIN_LAYERS.localities, showLocalities);
 
-    // Micromarkets
     setLayerVisibility(map, "micromarkets-fill", showMicromarkets);
     setLayerVisibility(map, "micromarkets-outline", showMicromarkets);
     setLayerVisibility(map, HIT_LAYERS.micromarkets, showMicromarkets);
-    setLayerVisibility(map, PIN_LAYERS.micromarkets, showMicromarkets); // pinned outline
+    setLayerVisibility(map, PIN_LAYERS.micromarkets, showMicromarkets);
 
-    // Projects
     setLayerVisibility(map, "projects-circle", showProjects);
     setLayerVisibility(map, HIT_LAYERS.projects, showProjects);
 
-    // Roads
     setLayerVisibility(map, "roads-line", showRoads);
     setLayerVisibility(map, HIT_LAYERS.roads, showRoads);
 
-    // City hit always on (city outline always on)
     setLayerVisibility(map, HIT_LAYERS.city, true);
   }, [showLocalities, showMicromarkets, showProjects, showRoads]);
 
@@ -710,12 +693,7 @@ export default function MapView() {
       ],
     ]);
 
-    map.setPaintProperty(fillLayer, "fill-opacity", [
-      "case",
-      ["<=", valueExpr, -1],
-      0.04,
-      isMm ? 0.28 : 0.24,
-    ]);
+    map.setPaintProperty(fillLayer, "fill-opacity", ["case", ["<=", valueExpr, -1], 0.04, isMm ? 0.28 : 0.24]);
   }, [enableChoropleth, choroplethLevel]);
 
   // -----------------------------
@@ -826,7 +804,7 @@ export default function MapView() {
   const pinnedSeries = useMemo(() => {
     if (!pinned || !pinnedDoc) return [];
     const months = pinnedDoc.months ?? [];
-    const rows = months.map((m) => {
+    return months.map((m) => {
       const bucket = pinnedDoc.byMonth?.[m]?.[pinned.joinKey];
       return {
         month: m,
@@ -834,7 +812,6 @@ export default function MapView() {
         n: typeof bucket?.n === "number" ? bucket.n : null,
       };
     });
-    return rows;
   }, [pinned, pinnedDoc]);
 
   return (
@@ -1107,22 +1084,10 @@ export default function MapView() {
                               <td style={{ padding: "8px 10px", borderBottom: "1px solid #f3f4f6" }}>
                                 {parseMonthLabel(r.month)}
                               </td>
-                              <td
-                                style={{
-                                  padding: "8px 10px",
-                                  textAlign: "right",
-                                  borderBottom: "1px solid #f3f4f6",
-                                }}
-                              >
+                              <td style={{ padding: "8px 10px", textAlign: "right", borderBottom: "1px solid #f3f4f6" }}>
                                 {typeof r.v === "number" ? fmtMoney(r.v) : "-"}
                               </td>
-                              <td
-                                style={{
-                                  padding: "8px 10px",
-                                  textAlign: "right",
-                                  borderBottom: "1px solid #f3f4f6",
-                                }}
-                              >
+                              <td style={{ padding: "8px 10px", textAlign: "right", borderBottom: "1px solid #f3f4f6" }}>
                                 {typeof r.n === "number" ? r.n : "-"}
                               </td>
                             </tr>
@@ -1265,7 +1230,6 @@ export default function MapView() {
 }
 
 function targetToLayerId(target: InspectTarget) {
-  // Use HIT layers so querying is reliable
   switch (target) {
     case "localities":
       return HIT_LAYERS.localities;
