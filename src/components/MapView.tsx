@@ -1,7 +1,8 @@
 "use client";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import mapboxgl, { Map, MapMouseEvent } from "mapbox-gl";
+import mapboxgl, { AnyLayer, Map, MapMouseEvent, MapboxGeoJSONFeature } from "mapbox-gl";
+import type { ExpressionSpecification } from "mapbox-gl";
 import { TILESETS } from "@/config/tilesets";
 
 type PickInfo = {
@@ -58,6 +59,18 @@ const PIN_LAYERS = {
   micromarkets: "pinned-mm-outline",
   localities: "pinned-loc-outline",
 } as const;
+
+// ---- Typed helpers (avoid `any`) ----
+type LayerWithSourceLayer = AnyLayer & { "source-layer"?: string };
+type FeatureId = string | number;
+
+function getSourceLayer(f: MapboxGeoJSONFeature): string {
+  return (f.layer as LayerWithSourceLayer)["source-layer"] ?? "";
+}
+
+function toFeatureId(v: unknown): FeatureId | null {
+  return typeof v === "string" || typeof v === "number" ? v : null;
+}
 
 function safeJson(v: unknown) {
   try {
@@ -452,8 +465,8 @@ export default function MapView() {
         const props = (f.properties ?? {}) as Record<string, unknown>;
         setHoverInfo({
           layerId: f.layer.id,
-          sourceLayer: (f.layer as any)["source-layer"] ?? "",
-          featureId: (f as any).id ?? null,
+          sourceLayer: getSourceLayer(f),
+          featureId: f.id ?? null,
           propertyKeys: Object.keys(props),
           properties: props,
           lngLat: { lng: e.lngLat.lng, lat: e.lngLat.lat },
@@ -479,15 +492,15 @@ export default function MapView() {
 
         setClickInfo({
           layerId: f.layer.id,
-          sourceLayer: (f.layer as any)["source-layer"] ?? "",
-          featureId: (f as any).id ?? null,
+          sourceLayer: getSourceLayer(f),
+          featureId: f.id ?? null,
           propertyKeys: Object.keys(props),
           properties: props,
           lngLat: { lng: e.lngLat.lng, lat: e.lngLat.lat },
         });
 
         // V2: Pinned selection only for polygon levels
-        const fid = (f as any).id ?? null;
+        const fid = toFeatureId(f.id);
 
         if (layer === HIT_LAYERS.micromarkets && fid !== null) {
           const name =
@@ -648,7 +661,7 @@ export default function MapView() {
       map.easeTo({ pitch: 60, bearing: -20, duration: 600 });
     } else {
       try {
-        map.setTerrain(null as any);
+        map.setTerrain(null);
       } catch {
         // ignore
       }
@@ -674,7 +687,7 @@ export default function MapView() {
       return;
     }
 
-    const valueExpr: any = ["coalesce", ["feature-state", "v"], -1];
+    const valueExpr: ExpressionSpecification = ["coalesce", ["feature-state", "v"], -1];
 
     map.setPaintProperty(fillLayer, "fill-color", [
       "case",
@@ -734,7 +747,7 @@ export default function MapView() {
     if (!map.getSource(sourceId) || !map.getLayer(fillLayer)) return;
 
     const computeLegendAndApply = () => {
-      const features = map.queryRenderedFeatures({ layers: [fillLayer] }) as any[];
+      const features = map.queryRenderedFeatures({ layers: [fillLayer] });
 
       let min = Number.POSITIVE_INFINITY;
       let max = Number.NEGATIVE_INFINITY;
@@ -742,14 +755,14 @@ export default function MapView() {
       let missing = 0;
 
       for (const f of features) {
-        const fid = f?.id;
-        if (fid === undefined || fid === null) continue;
+        const fid = toFeatureId(f.id);
+        if (fid === null) continue;
 
         let key = "";
         if (isMm) {
           key = String(fid);
         } else {
-          const lname = f?.properties?.LocalityName;
+          const lname = (f.properties as Record<string, unknown> | undefined)?.LocalityName;
           key = typeof lname === "string" ? lname : "";
         }
 
