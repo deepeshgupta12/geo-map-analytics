@@ -102,6 +102,18 @@ function getStrProp(props: Record<string, unknown> | null | undefined, key: stri
   return typeof v === "string" ? v : "";
 }
 
+function clamp(n: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, n));
+}
+
+function isTypingTarget(el: EventTarget | null): boolean {
+  if (!el || !(el instanceof HTMLElement)) return false;
+  const tag = el.tagName.toLowerCase();
+  if (tag === "input" || tag === "textarea" || tag === "select") return true;
+  if (el.isContentEditable) return true;
+  return false;
+}
+
 export default function MapView() {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<Map | null>(null);
@@ -174,6 +186,11 @@ export default function MapView() {
       projects: `mapbox://${TILESETS.projects.id}`,
     };
   }, []);
+
+  // Utility: stop playback (used by map interaction handlers + UI)
+  const stopPlayback = () => {
+    if (isPlayingRef.current) setIsPlaying(false);
+  };
 
   // -----------------------------
   // Load metrics JSON (V1)
@@ -275,9 +292,66 @@ export default function MapView() {
     };
   }, [isPlaying, monthOptions, playSpeedMs, loopPlay, enableChoropleth]);
 
-  const stopPlayback = () => {
-    if (isPlayingRef.current) setIsPlaying(false);
-  };
+  // -----------------------------
+  // v2.1.1 Step C: stop playback + clamp month on level switch
+  // - Stop playback even if something changes choroplethLevel programmatically
+  // - Reset month to latest month of the newly selected level (when available)
+  // -----------------------------
+  useEffect(() => {
+    stopPlayback();
+
+    // Optional: clear hover/click (prevents "stale" inspector state on level change)
+    setHoverInfo(null);
+    setClickInfo(null);
+
+    const doc = choroplethLevel === "micromarkets" ? mmDoc : locDoc;
+    const latest = doc?.months?.[doc.months.length - 1];
+    if (latest) setMetricMonth(latest);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [choroplethLevel]);
+
+  // -----------------------------
+  // v2.1.1 Step A: keyboard shortcuts
+  // - Space: play/pause
+  // - Left/Right: prev/next month
+  // - Shift + Left/Right: jump by 3
+  // - Ignore when typing in inputs/selects/textareas/contenteditable
+  // -----------------------------
+  useEffect(() => {
+    const onKeyDown = (ev: KeyboardEvent) => {
+      if (isTypingTarget(ev.target)) return;
+
+      const hasMonths = monthOptions.length > 0;
+      const canPlay = enableChoropleth && monthOptions.length >= 2;
+
+      // Space toggles play/pause
+      if (ev.code === "Space") {
+        if (!canPlay) return;
+        ev.preventDefault();
+        setIsPlaying((p) => !p);
+        return;
+      }
+
+      // Arrow keys move month
+      if (ev.key !== "ArrowLeft" && ev.key !== "ArrowRight") return;
+      if (!enableChoropleth || !hasMonths) return;
+
+      ev.preventDefault();
+      stopPlayback();
+
+      const step = ev.shiftKey ? 3 : 1;
+      const curIdx = monthOptions.indexOf(metricMonth);
+      const safeIdx = curIdx >= 0 ? curIdx : monthOptions.length - 1;
+
+      const delta = ev.key === "ArrowRight" ? step : -step;
+      const nextIdx = clamp(safeIdx + delta, 0, monthOptions.length - 1);
+      const next = monthOptions[nextIdx];
+      if (next) setMetricMonth(next);
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [enableChoropleth, monthOptions, metricMonth]);
 
   // -----------------------------
   // Map init
@@ -524,16 +598,17 @@ export default function MapView() {
       map.on("mousemove", onMove);
       map.on("click", onClick);
 
-      const onKeyDown = (ev: KeyboardEvent) => {
+      // Keep Escape behavior local to map lifecycle: clears pinned and stops playback
+      const onEsc = (ev: KeyboardEvent) => {
         if (ev.key === "Escape") {
           stopPlayback();
           setPinned(null);
         }
       };
-      window.addEventListener("keydown", onKeyDown);
+      window.addEventListener("keydown", onEsc);
 
       map.once("remove", () => {
-        window.removeEventListener("keydown", onKeyDown);
+        window.removeEventListener("keydown", onEsc);
         map.off("dragstart", stop);
         map.off("zoomstart", stop);
         map.off("rotatestart", stop);
@@ -886,7 +961,13 @@ export default function MapView() {
                 </div>
               </div>
 
-              <div style={{ marginTop: 8 }}>
+              {/* Step B: clearer scrub feedback */}
+              <div style={{ marginTop: 6, display: "flex", justifyContent: "space-between", fontSize: 11, opacity: 0.65 }}>
+                <div>{monthOptions[0] ? parseMonthLabel(monthOptions[0]) : "-"}</div>
+                <div>{monthOptions.length ? parseMonthLabel(monthOptions[monthOptions.length - 1]) : "-"}</div>
+              </div>
+
+              <div style={{ marginTop: 6 }}>
                 <input
                   type="range"
                   min={0}
@@ -904,7 +985,7 @@ export default function MapView() {
                 />
               </div>
 
-              <div style={{ marginTop: 10, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+              <div style={{ marginTop: 8, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
                 <button
                   onClick={() => {
                     if (!enableChoropleth) return;
@@ -951,8 +1032,9 @@ export default function MapView() {
                 Loop playback
               </label>
 
-              <div style={{ marginTop: 8, fontSize: 12, opacity: 0.7 }}>
-                Playback stops on map interaction (drag/zoom/click) or manual month change.
+              {/* Step B: helper text */}
+              <div style={{ marginTop: 8, fontSize: 12, opacity: 0.72, lineHeight: 1.35 }}>
+                Controls: Space = Play/Pause, ←/→ = month, Shift+←/→ = jump 3 months. Playback stops on map interaction or manual month change.
               </div>
             </div>
           </div>
@@ -1064,14 +1146,10 @@ export default function MapView() {
                           <th style={{ textAlign: "left", padding: "8px 10px", borderBottom: "1px solid #e5e7eb" }}>
                             Month
                           </th>
-                          <th
-                            style={{ textAlign: "right", padding: "8px 10px", borderBottom: "1px solid #e5e7eb" }}
-                          >
+                          <th style={{ textAlign: "right", padding: "8px 10px", borderBottom: "1px solid #e5e7eb" }}>
                             psf
                           </th>
-                          <th
-                            style={{ textAlign: "right", padding: "8px 10px", borderBottom: "1px solid #e5e7eb" }}
-                          >
+                          <th style={{ textAlign: "right", padding: "8px 10px", borderBottom: "1px solid #e5e7eb" }}>
                             n
                           </th>
                         </tr>
@@ -1119,11 +1197,7 @@ export default function MapView() {
 
           <div style={{ marginBottom: 8 }}>
             <div style={{ fontSize: 12, opacity: 0.85, marginBottom: 4 }}>Light preset</div>
-            <select
-              value={lightPreset}
-              onChange={(e) => setLightPreset(e.target.value as LightPreset)}
-              style={{ width: "100%", padding: 8 }}
-            >
+            <select value={lightPreset} onChange={(e) => setLightPreset(e.target.value as LightPreset)} style={{ width: "100%", padding: 8 }}>
               <option value="dawn">Dawn</option>
               <option value="day">Day</option>
               <option value="dusk">Dusk</option>
@@ -1166,11 +1240,7 @@ export default function MapView() {
           </label>
 
           <label style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 6 }}>
-            <input
-              type="checkbox"
-              checked={showMicromarkets}
-              onChange={(e) => setShowMicromarkets(e.target.checked)}
-            />
+            <input type="checkbox" checked={showMicromarkets} onChange={(e) => setShowMicromarkets(e.target.checked)} />
             Micromarkets
           </label>
 
@@ -1187,20 +1257,12 @@ export default function MapView() {
 
         <div style={{ marginBottom: 12 }}>
           <div style={{ fontWeight: 600 }}>Hover</div>
-          {hoverInfo ? (
-            <pre style={{ fontSize: 12, whiteSpace: "pre-wrap" }}>{safeJson(hoverInfo)}</pre>
-          ) : (
-            <div style={{ fontSize: 12, opacity: 0.7 }}>Hover a feature on the map…</div>
-          )}
+          {hoverInfo ? <pre style={{ fontSize: 12, whiteSpace: "pre-wrap" }}>{safeJson(hoverInfo)}</pre> : <div style={{ fontSize: 12, opacity: 0.7 }}>Hover a feature on the map…</div>}
         </div>
 
         <div>
           <div style={{ fontWeight: 600 }}>Click (Pinned)</div>
-          {clickInfo ? (
-            <pre style={{ fontSize: 12, whiteSpace: "pre-wrap" }}>{safeJson(clickInfo)}</pre>
-          ) : (
-            <div style={{ fontSize: 12, opacity: 0.7 }}>Click a feature to pin its properties…</div>
-          )}
+          {clickInfo ? <pre style={{ fontSize: 12, whiteSpace: "pre-wrap" }}>{safeJson(clickInfo)}</pre> : <div style={{ fontSize: 12, opacity: 0.7 }}>Click a feature to pin its properties…</div>}
         </div>
 
         <hr style={{ margin: "12px 0" }} />
@@ -1220,8 +1282,7 @@ export default function MapView() {
             </ul>
           </div>
           <div style={{ marginTop: 8 }}>
-            Inspector hit-testing uses transparent hit layers (thicker lines / larger points) so hover/click works
-            reliably.
+            Inspector hit-testing uses transparent hit layers (thicker lines / larger points) so hover/click works reliably.
           </div>
         </div>
       </div>
