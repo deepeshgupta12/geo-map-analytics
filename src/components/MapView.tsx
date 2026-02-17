@@ -47,8 +47,8 @@ const FIT_BOUNDS_OPTS: FitBoundsOptions = {
   maxZoom: 13.75,
 };
 
-// UI tokens
-const UI = {
+// UI tokens (exported for reuse/testing)
+export const UI = {
   panelBg: "#0B0F19",
   panelText: "#E5E7EB",
   panelBorder: "rgba(255,255,255,0.12)",
@@ -132,7 +132,6 @@ function isShiftPressed(evt: unknown): boolean {
   if (typeof maybeShift.shiftKey === "boolean") return maybeShift.shiftKey;
 
   if (typeof maybeShift.getModifierState === "function") {
-    // getModifierState exists on KeyboardEvent/MouseEvent/PointerEvent
     return Boolean((maybeShift.getModifierState as (key: string) => boolean)("Shift"));
   }
 
@@ -239,9 +238,47 @@ function buildSparklinePath(values: number[], w: number, h: number) {
 type DimItem = { id: number; name: string; micromarketId?: number | null; pincode?: string | null };
 type DimDoc = { cityId: number; items: DimItem[] };
 
+// -----------------------------
+// Export helpers (exported)
+// -----------------------------
+export function isoCompactNow() {
+  const d = new Date();
+  const pad2 = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}_${pad2(d.getHours())}${pad2(d.getMinutes())}${pad2(d.getSeconds())}`;
+}
+
+export function downloadTextFile(filename: string, content: string, mime = "application/json") {
+  const blob = new Blob([content], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+export function downloadDataUrl(filename: string, dataUrl: string) {
+  const a = document.createElement("a");
+  a.href = dataUrl;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
+export function exportMapPng(map: Map, filename: string) {
+  const canvas = map.getCanvas();
+  const dataUrl = canvas.toDataURL("image/png");
+  downloadDataUrl(filename, dataUrl);
+}
+
 export default function MapView() {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<Map | null>(null);
+
+  const [mapReady, setMapReady] = useState(false);
 
   const [hoverInfo, setHoverInfo] = useState<PickInfo | null>(null);
   const [clickInfo, setClickInfo] = useState<PickInfo | null>(null);
@@ -332,6 +369,45 @@ export default function MapView() {
       pitch: enable3D ? 60 : 0,
       duration: 650,
     });
+  };
+
+  // -----------------------------
+  // Export handlers (UI + keyboard)
+  // -----------------------------
+  const buildExportBaseName = () => {
+    const monthLabel = metricMonth ? metricMonth.replaceAll("-", "") : "nomonth";
+    return `map_${metricKey}_${choroplethLevel}_${monthLabel}_${isoCompactNow()}`;
+  };
+
+  const handleExportPng = () => {
+    const map = mapRef.current;
+    if (!map) return;
+
+    try {
+      const name = `${buildExportBaseName()}.png`;
+      exportMapPng(map, name);
+    } catch (e) {
+      console.error("PNG export failed:", e);
+      alert(
+        "PNG export failed. If you're using external images/icons without CORS, the canvas can become tainted. Check console for details."
+      );
+    }
+  };
+
+  const handleExportStateJson = () => {
+    const state = {
+      metricKey,
+      choroplethLevel,
+      metricMonth,
+      lightPreset,
+      enable3D,
+      enableChoropleth,
+      pinA,
+      pinB,
+      exportedAt: new Date().toISOString(),
+    };
+    const name = `${buildExportBaseName()}_state.json`;
+    downloadTextFile(name, JSON.stringify(state, null, 2), "application/json");
   };
 
   // -----------------------------
@@ -536,6 +612,7 @@ export default function MapView() {
       pitch: 0,
       bearing: 0,
       antialias: true,
+      preserveDrawingBuffer: true, // ✅ required for PNG export
       config: { basemap: { lightPreset } },
     });
 
@@ -550,6 +627,8 @@ export default function MapView() {
     map.addControl(new mapboxgl.NavigationControl({ visualizePitch: true }), "top-right");
 
     map.on("load", () => {
+      setMapReady(true);
+
       map.addSource("city-src", { type: "vector", url: vectorSources.city });
       map.addSource("micromarkets-src", { type: "vector", url: vectorSources.micromarkets });
       map.addSource("localities-src", { type: "vector", url: vectorSources.localities });
@@ -697,8 +776,8 @@ export default function MapView() {
 
       // Track shift on mousedown (fixes shift losing state on click in some cases)
       const onMouseDown = (e: MapMouseEvent) => {
-      const oe = e.originalEvent; // typed by mapbox-gl
-      shiftDownRef.current = isShiftPressed(oe) || isShiftPressed(e);
+        const oe = e.originalEvent;
+        shiftDownRef.current = isShiftPressed(oe) || isShiftPressed(e);
       };
       const onTouchStart = () => {
         shiftDownRef.current = false;
@@ -777,7 +856,7 @@ export default function MapView() {
         const fid = toFeatureId(f.id);
 
         // Robust: use originalEvent shiftKey OR cached shift from mousedown
-        const oe = e.originalEvent; // typed by mapbox-gl
+        const oe = e.originalEvent;
         const assignToB = isShiftPressed(oe) || shiftDownRef.current === true;
 
         // Reset cached shift after processing one click
@@ -828,6 +907,10 @@ export default function MapView() {
           setPinB(null);
         }
         if (ev.key === "r" || ev.key === "R") resetView();
+
+        // Export shortcuts
+        if (ev.key === "p" || ev.key === "P") handleExportPng();
+        if (ev.key === "j" || ev.key === "J") handleExportStateJson();
       };
       window.addEventListener("keydown", onKeyDown);
 
@@ -879,10 +962,7 @@ export default function MapView() {
       if (!p) return;
       if (p.level === "micromarkets") {
         const fidNum = Number(p.featureId ?? p.joinKey);
-        map.setFilter(
-          which === "A" ? PIN_LAYERS.mmA : PIN_LAYERS.mmB,
-          ["==", ["id"], Number.isFinite(fidNum) ? fidNum : -999999]
-        );
+        map.setFilter(which === "A" ? PIN_LAYERS.mmA : PIN_LAYERS.mmB, ["==", ["id"], Number.isFinite(fidNum) ? fidNum : -999999]);
       } else {
         map.setFilter(which === "A" ? PIN_LAYERS.locA : PIN_LAYERS.locB, ["==", ["get", "LocalityName"], p.joinKey || "__nope__"]);
       }
@@ -1062,16 +1142,10 @@ export default function MapView() {
 
     const stepExpr: ExpressionSpecification = ["step", valueExpr, palette[0]];
     for (let i = 1; i < palette.length; i++) {
-      // ExpressionSpecification is a nested tuple type; push via cast to keep strict TS + ESLint happy
       (stepExpr as unknown as unknown[]).push(stops[i], palette[i]);
     }
 
-    map.setPaintProperty(fillLayer, "fill-color", [
-      "case",
-      ["<=", valueExpr, -1],
-      UI.missing,
-      stepExpr,
-    ]);
+    map.setPaintProperty(fillLayer, "fill-color", ["case", ["<=", valueExpr, -1], UI.missing, stepExpr]);
 
     map.setPaintProperty(fillLayer, "fill-opacity", ["case", ["<=", valueExpr, -1], 0.04, isMm ? 0.28 : 0.24]);
   }, [enableChoropleth, choroplethLevel, legend.stops]);
@@ -1311,6 +1385,59 @@ export default function MapView() {
       >
         <h3 style={{ margin: "0 0 8px 0" }}>Inspector</h3>
 
+        {/* Export controls */}
+        <div
+          style={{
+            marginBottom: 12,
+            padding: 10,
+            border: `1px solid ${UI.panelBorder}`,
+            borderRadius: 8,
+            background: "rgba(255,255,255,0.03)",
+          }}
+        >
+          <div style={{ fontWeight: 600, marginBottom: 8 }}>Exports</div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+            <button
+              onClick={handleExportPng}
+              disabled={!mapReady}
+              style={{
+                fontSize: 12,
+                padding: "10px 10px",
+                border: `1px solid ${UI.controlBorder}`,
+                borderRadius: 8,
+                background: UI.controlBg,
+                color: UI.controlText,
+                cursor: mapReady ? "pointer" : "not-allowed",
+                opacity: mapReady ? 1 : 0.55,
+              }}
+              title={mapReady ? "Export current map canvas as PNG (P)" : "Map not ready yet"}
+            >
+              Export PNG (P)
+            </button>
+
+            <button
+              onClick={handleExportStateJson}
+              style={{
+                fontSize: 12,
+                padding: "10px 10px",
+                border: `1px solid ${UI.controlBorder}`,
+                borderRadius: 8,
+                background: UI.controlBg,
+                color: UI.controlText,
+                cursor: "pointer",
+              }}
+              title="Export current inspector state as JSON (J)"
+            >
+              Export State JSON (J)
+            </button>
+          </div>
+
+          <div style={{ marginTop: 8, fontSize: 12, color: UI.mutedText }}>
+            Notes: PNG export requires <code>preserveDrawingBuffer</code>. If you later add external images/icons without CORS, export may fail due to a tainted canvas.
+          </div>
+        </div>
+
         {/* v2.3 Controls */}
         <div
           style={{
@@ -1496,12 +1623,7 @@ export default function MapView() {
               </div>
 
               <label style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 10, fontSize: 12 }}>
-                <input
-                  type="checkbox"
-                  checked={loopPlay}
-                  onChange={(e) => setLoopPlay(e.target.checked)}
-                  disabled={!enableChoropleth || monthOptions.length < 2}
-                />
+                <input type="checkbox" checked={loopPlay} onChange={(e) => setLoopPlay(e.target.checked)} disabled={!enableChoropleth || monthOptions.length < 2} />
                 Loop playback
               </label>
 
@@ -1522,13 +1644,11 @@ export default function MapView() {
                   Month: <span style={{ fontWeight: 600 }}>{metricMonth ? parseMonthLabel(metricMonth) : "-"}</span>
                 </div>
                 <div>
-                  Range:{" "}
-                  <span style={{ fontWeight: 600 }}>{legend.min === null ? "-" : fmtMoney(legend.min)}</span> to{" "}
+                  Range: <span style={{ fontWeight: 600 }}>{legend.min === null ? "-" : fmtMoney(legend.min)}</span> to{" "}
                   <span style={{ fontWeight: 600 }}>{legend.max === null ? "-" : fmtMoney(legend.max)}</span>
                 </div>
                 <div>
-                  Data: <span style={{ fontWeight: 600 }}>{legend.count}</span> points,{" "}
-                  <span style={{ fontWeight: 600 }}>{legend.missing}</span> missing
+                  Data: <span style={{ fontWeight: 600 }}>{legend.count}</span> points, <span style={{ fontWeight: 600 }}>{legend.missing}</span> missing
                 </div>
               </div>
 
@@ -1692,8 +1812,7 @@ export default function MapView() {
                         <span style={{ color: UI.mutedText }}>(n: {typeof currentA?.n === "number" ? currentA.n : "-"})</span>
                       </div>
                       <div>
-                        Δ vs prev: <span style={{ fontWeight: 600 }}>{deltaA.abs}</span>{" "}
-                        <span style={{ color: UI.mutedText }}>({deltaA.pct})</span>
+                        Δ vs prev: <span style={{ fontWeight: 600 }}>{deltaA.abs}</span> <span style={{ color: UI.mutedText }}>({deltaA.pct})</span>
                       </div>
 
                       <div
@@ -1739,8 +1858,7 @@ export default function MapView() {
                         <span style={{ color: UI.mutedText }}>(n: {typeof currentB?.n === "number" ? currentB.n : "-"})</span>
                       </div>
                       <div>
-                        Δ vs prev: <span style={{ fontWeight: 600 }}>{deltaB.abs}</span>{" "}
-                        <span style={{ color: UI.mutedText }}>({deltaB.pct})</span>
+                        Δ vs prev: <span style={{ fontWeight: 600 }}>{deltaB.abs}</span> <span style={{ color: UI.mutedText }}>({deltaB.pct})</span>
                       </div>
 
                       <div
@@ -1774,8 +1892,7 @@ export default function MapView() {
               <div style={{ marginTop: 10, fontSize: 12, color: UI.mutedText }}>
                 {pinA && pinB && typeof currentA?.v === "number" && typeof currentB?.v === "number" ? (
                   <div>
-                    A − B (current month):{" "}
-                    <span style={{ fontWeight: 600, color: UI.panelText }}>{fmtMoney(Math.round(currentA.v - currentB.v))}</span>
+                    A − B (current month): <span style={{ fontWeight: 600, color: UI.panelText }}>{fmtMoney(Math.round(currentA.v - currentB.v))}</span>
                   </div>
                 ) : (
                   <div>Pin both A and B to see A − B delta.</div>
@@ -1889,20 +2006,12 @@ export default function MapView() {
         {/* Hover / Click debug */}
         <div style={{ marginBottom: 12 }}>
           <div style={{ fontWeight: 600 }}>Hover</div>
-          {hoverInfo ? (
-            <pre style={{ fontSize: 12, whiteSpace: "pre-wrap" }}>{safeJson(hoverInfo)}</pre>
-          ) : (
-            <div style={{ fontSize: 12, color: UI.mutedText }}>Hover a feature on the map…</div>
-          )}
+          {hoverInfo ? <pre style={{ fontSize: 12, whiteSpace: "pre-wrap" }}>{safeJson(hoverInfo)}</pre> : <div style={{ fontSize: 12, color: UI.mutedText }}>Hover a feature on the map…</div>}
         </div>
 
         <div>
           <div style={{ fontWeight: 600 }}>Click (Pinned)</div>
-          {clickInfo ? (
-            <pre style={{ fontSize: 12, whiteSpace: "pre-wrap" }}>{safeJson(clickInfo)}</pre>
-          ) : (
-            <div style={{ fontSize: 12, color: UI.mutedText }}>Click a feature to pin its properties…</div>
-          )}
+          {clickInfo ? <pre style={{ fontSize: 12, whiteSpace: "pre-wrap" }}>{safeJson(clickInfo)}</pre> : <div style={{ fontSize: 12, color: UI.mutedText }}>Click a feature to pin its properties…</div>}
         </div>
 
         <hr style={{ margin: "12px 0", borderColor: UI.panelBorder }} />
@@ -1914,6 +2023,7 @@ export default function MapView() {
             <li>Feature-state is applied only to visible polygons and cached per (metric, level, month).</li>
             <li>Shift+Click pins B for compare.</li>
             <li>URL is shareable: metric/level/month/pins/light/3D are encoded in query params.</li>
+            <li>Exports: Press P for PNG, J for State JSON.</li>
           </ul>
         </div>
       </div>
