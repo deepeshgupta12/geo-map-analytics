@@ -123,6 +123,15 @@ function getStrProp(props: Record<string, unknown> | null | undefined, key: stri
   return typeof v === "string" ? v : "";
 }
 
+// Robust Shift detection across MouseEvent/PointerEvent (and Mapbox wrapped events)
+function isShiftPressed(evt: unknown): boolean {
+  const e = evt as any;
+  if (!e) return false;
+  if (typeof e.shiftKey === "boolean") return e.shiftKey;
+  if (typeof e.getModifierState === "function") return !!e.getModifierState("Shift");
+  return false;
+}
+
 // Geometry -> bounds
 function isNumber(v: unknown): v is number {
   return typeof v === "number" && Number.isFinite(v);
@@ -286,6 +295,9 @@ export default function MapView() {
   const [searchQuery, setSearchQuery] = useState("");
   const [searchScope, setSearchScope] = useState<ChoroplethLevel>("localities");
 
+  // SHIFT state cache (fixes cases where click event loses modifier state)
+  const shiftDownRef = useRef(false);
+
   const token = process.env.NEXT_PUBLIC_MAPBOX_TOKEN;
 
   const vectorSources = useMemo(() => {
@@ -349,7 +361,6 @@ export default function MapView() {
 
     setPinA(parsePin(sp.get("pinA")));
     setPinB(parsePin(sp.get("pinB")));
-     
   }, []);
 
   // Write URL state (replaceState)
@@ -521,6 +532,13 @@ export default function MapView() {
       config: { basemap: { lightPreset } },
     });
 
+    // IMPORTANT: Shift is used for Pin-B selection. Disable Mapbox BoxZoom (Shift+drag).
+    try {
+      map.boxZoom.disable();
+    } catch {
+      // ignore
+    }
+
     mapRef.current = map;
     map.addControl(new mapboxgl.NavigationControl({ visualizePitch: true }), "top-right");
 
@@ -670,6 +688,17 @@ export default function MapView() {
       map.on("mousedown", stop);
       map.on("touchstart", stop);
 
+      // Track shift on mousedown (fixes shift losing state on click in some cases)
+      const onMouseDown = (e: MapMouseEvent) => {
+        const oe = (e as any).originalEvent;
+        shiftDownRef.current = isShiftPressed(oe) || isShiftPressed(e);
+      };
+      const onTouchStart = () => {
+        shiftDownRef.current = false;
+      };
+      map.on("mousedown", onMouseDown);
+      map.on("touchstart", onTouchStart);
+
       // Pointer move RAF (performance)
       let rafId: number | null = null;
       let lastMoveEvt: MapMouseEvent | null = null;
@@ -739,7 +768,13 @@ export default function MapView() {
         });
 
         const fid = toFeatureId(f.id);
-        const assignToB = (e.originalEvent as MouseEvent | undefined)?.shiftKey ?? false;
+
+        // Robust: use originalEvent shiftKey OR cached shift from mousedown
+        const oe = (e as any).originalEvent;
+        const assignToB = isShiftPressed(oe) || shiftDownRef.current === true;
+
+        // Reset cached shift after processing one click
+        shiftDownRef.current = false;
 
         if (layer === HIT_LAYERS.micromarkets && fid !== null) {
           const name =
@@ -798,6 +833,10 @@ export default function MapView() {
         map.off("movestart", stop);
         map.off("mousedown", stop);
         map.off("touchstart", stop);
+
+        map.off("mousedown", onMouseDown);
+        map.off("touchstart", onTouchStart);
+
         map.off("mousemove", onMove);
         map.off("click", onClick);
         if (rafId !== null) window.cancelAnimationFrame(rafId);
@@ -833,7 +872,10 @@ export default function MapView() {
       if (!p) return;
       if (p.level === "micromarkets") {
         const fidNum = Number(p.featureId ?? p.joinKey);
-        map.setFilter(which === "A" ? PIN_LAYERS.mmA : PIN_LAYERS.mmB, ["==", ["id"], Number.isFinite(fidNum) ? fidNum : -999999]);
+        map.setFilter(
+          which === "A" ? PIN_LAYERS.mmA : PIN_LAYERS.mmB,
+          ["==", ["id"], Number.isFinite(fidNum) ? fidNum : -999999]
+        );
       } else {
         map.setFilter(which === "A" ? PIN_LAYERS.locA : PIN_LAYERS.locB, ["==", ["get", "LocalityName"], p.joinKey || "__nope__"]);
       }
@@ -1008,12 +1050,9 @@ export default function MapView() {
 
     const valueExpr: ExpressionSpecification = ["coalesce", ["feature-state", "v"], -1];
 
-    // Build step expression from quantile stops -> palette
-    // stops length = bucketCount+1
     const stops = legend.stops.slice();
     const palette = UI.palette.slice(0, Math.max(1, stops.length - 1));
 
-    // step: ["step", valueExpr, defaultColor, stop1, color1, stop2, color2, ...]
     const stepExpr: any[] = ["step", valueExpr, palette[0]];
     for (let i = 1; i < palette.length; i++) {
       stepExpr.push(stops[i], palette[i]);
@@ -1031,7 +1070,6 @@ export default function MapView() {
 
   // -----------------------------
   // Choropleth: visible-only feature-state + cache (level, month, metric)
-  // Compute on moveend/zoomend and on month/metric/level changes.
   // -----------------------------
   const stateCacheRef = useRef<Record<string, Set<string | number>>>({});
   const lastApplyRef = useRef<{ cacheKey: string; lastZoom: number; lastCenter: string } | null>(null);
@@ -1060,7 +1098,6 @@ export default function MapView() {
       const centerKey = `${center.lng.toFixed(5)},${center.lat.toFixed(5)}`;
       const z = map.getZoom();
 
-      // Small guard: if nothing changed much, skip
       const last = lastApplyRef.current;
       if (last && last.cacheKey === cacheKey && last.lastZoom === z && last.lastCenter === centerKey) {
         return;
@@ -1094,7 +1131,6 @@ export default function MapView() {
       }
     };
 
-    // initial apply + attach listeners
     applyVisible();
 
     const onMoveEnd = () => applyVisible();
@@ -1171,9 +1207,7 @@ export default function MapView() {
     const q = searchQuery.trim().toLowerCase();
     if (!q) return [];
     const list = searchScope === "localities" ? dimLocalities : dimMicromarkets;
-    return list
-      .filter((x) => x.name.toLowerCase().includes(q))
-      .slice(0, 12);
+    return list.filter((x) => x.name.toLowerCase().includes(q)).slice(0, 12);
   }, [searchQuery, searchScope, dimLocalities, dimMicromarkets]);
 
   async function jumpToByName(level: ChoroplethLevel, name: string) {
@@ -1182,19 +1216,16 @@ export default function MapView() {
     const map = mapRef.current;
     if (!map) return;
 
-    // Ensure relevant layers visible
     if (level === "micromarkets") setShowMicromarkets(true);
     else setShowLocalities(true);
 
     setInspectTarget(level === "micromarkets" ? "micromarkets" : "localities");
     setChoroplethLevel(level);
 
-    // Try to find a source feature by name (requires tiles loaded in area)
     const srcId = level === "micromarkets" ? "micromarkets-src" : "localities-src";
     const srcLayer = level === "micromarkets" ? TILESETS.micromarkets.sourceLayer : TILESETS.localities.sourceLayer;
 
     const tryFind = () => {
-      // NOTE: querySourceFeatures filter works on properties; we try common name fields.
       const nameProps = level === "micromarkets" ? ["MicroMarketName", "MicromarketName", "Micromarket"] : ["LocalityName"];
       for (const prop of nameProps) {
         try {
@@ -1233,10 +1264,8 @@ export default function MapView() {
       return false;
     };
 
-    // First attempt
     if (tryFind()) return;
 
-    // Fallback: zoom a bit to load more tiles around Mumbai center, then retry on idle
     map.easeTo({ center: DEFAULT_CENTER as unknown as LngLatLike, zoom: Math.max(map.getZoom(), 11.5), duration: 450 });
     map.once("idle", () => {
       tryFind();
@@ -1637,10 +1666,7 @@ export default function MapView() {
                     <div style={{ marginTop: 8, fontSize: 12, display: "grid", gap: 6 }}>
                       <div style={{ fontWeight: 600 }}>{pinA.displayName}</div>
                       <div>
-                        Value:{" "}
-                        <span style={{ fontWeight: 600 }}>
-                          {typeof currentA?.v === "number" ? fmtMoney(currentA.v) : "-"}
-                        </span>{" "}
+                        Value: <span style={{ fontWeight: 600 }}>{typeof currentA?.v === "number" ? fmtMoney(currentA.v) : "-"}</span>{" "}
                         <span style={{ color: UI.mutedText }}>(n: {typeof currentA?.n === "number" ? currentA.n : "-"})</span>
                       </div>
                       <div>
@@ -1687,10 +1713,7 @@ export default function MapView() {
                     <div style={{ marginTop: 8, fontSize: 12, display: "grid", gap: 6 }}>
                       <div style={{ fontWeight: 600 }}>{pinB.displayName}</div>
                       <div>
-                        Value:{" "}
-                        <span style={{ fontWeight: 600 }}>
-                          {typeof currentB?.v === "number" ? fmtMoney(currentB.v) : "-"}
-                        </span>{" "}
+                        Value: <span style={{ fontWeight: 600 }}>{typeof currentB?.v === "number" ? fmtMoney(currentB.v) : "-"}</span>{" "}
                         <span style={{ color: UI.mutedText }}>(n: {typeof currentB?.n === "number" ? currentB.n : "-"})</span>
                       </div>
                       <div>
@@ -1730,9 +1753,7 @@ export default function MapView() {
                 {pinA && pinB && typeof currentA?.v === "number" && typeof currentB?.v === "number" ? (
                   <div>
                     A − B (current month):{" "}
-                    <span style={{ fontWeight: 600, color: UI.panelText }}>
-                      {fmtMoney(Math.round(currentA.v - currentB.v))}
-                    </span>
+                    <span style={{ fontWeight: 600, color: UI.panelText }}>{fmtMoney(Math.round(currentA.v - currentB.v))}</span>
                   </div>
                 ) : (
                   <div>Pin both A and B to see A − B delta.</div>
