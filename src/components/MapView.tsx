@@ -2,7 +2,7 @@
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import mapboxgl, { AnyLayer, Map, MapMouseEvent, MapboxGeoJSONFeature } from "mapbox-gl";
-import type { ExpressionSpecification, FitBoundsOptions, LngLatLike } from "mapbox-gl";
+import type { ExpressionSpecification, FitBoundsOptions, LngLatLike, FilterSpecification } from "mapbox-gl";
 import { TILESETS } from "@/config/tilesets";
 import { METRICS, getMetricDef, ChoroplethLevel as ChoroplethLevelCfg } from "@/config/metrics";
 import { computeQuantileStops, formatBucketRanges } from "@/lib/quantiles";
@@ -123,12 +123,19 @@ function getStrProp(props: Record<string, unknown> | null | undefined, key: stri
   return typeof v === "string" ? v : "";
 }
 
-// Robust Shift detection across MouseEvent/PointerEvent (and Mapbox wrapped events)
+// Robust Shift detection across MouseEvent/PointerEvent/KeyboardEvent + getModifierState
 function isShiftPressed(evt: unknown): boolean {
-  const e = evt as any;
-  if (!e) return false;
-  if (typeof e.shiftKey === "boolean") return e.shiftKey;
-  if (typeof e.getModifierState === "function") return !!e.getModifierState("Shift");
+  if (!evt || typeof evt !== "object") return false;
+
+  const maybeShift = evt as { shiftKey?: unknown; getModifierState?: unknown };
+
+  if (typeof maybeShift.shiftKey === "boolean") return maybeShift.shiftKey;
+
+  if (typeof maybeShift.getModifierState === "function") {
+    // getModifierState exists on KeyboardEvent/MouseEvent/PointerEvent
+    return Boolean((maybeShift.getModifierState as (key: string) => boolean)("Shift"));
+  }
+
   return false;
 }
 
@@ -690,8 +697,8 @@ export default function MapView() {
 
       // Track shift on mousedown (fixes shift losing state on click in some cases)
       const onMouseDown = (e: MapMouseEvent) => {
-        const oe = (e as any).originalEvent;
-        shiftDownRef.current = isShiftPressed(oe) || isShiftPressed(e);
+      const oe = e.originalEvent; // typed by mapbox-gl
+      shiftDownRef.current = isShiftPressed(oe) || isShiftPressed(e);
       };
       const onTouchStart = () => {
         shiftDownRef.current = false;
@@ -770,7 +777,7 @@ export default function MapView() {
         const fid = toFeatureId(f.id);
 
         // Robust: use originalEvent shiftKey OR cached shift from mousedown
-        const oe = (e as any).originalEvent;
+        const oe = e.originalEvent; // typed by mapbox-gl
         const assignToB = isShiftPressed(oe) || shiftDownRef.current === true;
 
         // Reset cached shift after processing one click
@@ -1053,9 +1060,10 @@ export default function MapView() {
     const stops = legend.stops.slice();
     const palette = UI.palette.slice(0, Math.max(1, stops.length - 1));
 
-    const stepExpr: any[] = ["step", valueExpr, palette[0]];
+    const stepExpr: ExpressionSpecification = ["step", valueExpr, palette[0]];
     for (let i = 1; i < palette.length; i++) {
-      stepExpr.push(stops[i], palette[i]);
+      // ExpressionSpecification is a nested tuple type; push via cast to keep strict TS + ESLint happy
+      (stepExpr as unknown as unknown[]).push(stops[i], palette[i]);
     }
 
     map.setPaintProperty(fillLayer, "fill-color", [
@@ -1148,17 +1156,31 @@ export default function MapView() {
   // -----------------------------
   // Pinned series (A/B) from activeDoc
   // -----------------------------
-  const pinnedSeries = (p: PinnedSelection | null) => {
-    if (!p || !activeDoc) return [];
+  const seriesA = useMemo(() => {
+    if (!pinA || !activeDoc) return [];
     const months = activeDoc.months ?? [];
     return months.map((m) => {
-      const bucket = activeDoc.byMonth?.[m]?.[p.joinKey];
-      return { month: m, v: typeof bucket?.v === "number" ? bucket.v : null, n: typeof bucket?.n === "number" ? bucket.n : null };
+      const bucket = activeDoc.byMonth?.[m]?.[pinA.joinKey];
+      return {
+        month: m,
+        v: typeof bucket?.v === "number" ? bucket.v : null,
+        n: typeof bucket?.n === "number" ? bucket.n : null,
+      };
     });
-  };
+  }, [pinA, activeDoc]);
 
-  const seriesA = useMemo(() => pinnedSeries(pinA), [pinA, activeDoc]);
-  const seriesB = useMemo(() => pinnedSeries(pinB), [pinB, activeDoc]);
+  const seriesB = useMemo(() => {
+    if (!pinB || !activeDoc) return [];
+    const months = activeDoc.months ?? [];
+    return months.map((m) => {
+      const bucket = activeDoc.byMonth?.[m]?.[pinB.joinKey];
+      return {
+        month: m,
+        v: typeof bucket?.v === "number" ? bucket.v : null,
+        n: typeof bucket?.n === "number" ? bucket.n : null,
+      };
+    });
+  }, [pinB, activeDoc]);
 
   const currentA = useMemo(() => {
     if (!pinA || !activeDoc || !metricMonth) return null;
@@ -1231,12 +1253,12 @@ export default function MapView() {
         try {
           const feats = map.querySourceFeatures(srcId, {
             sourceLayer: srcLayer,
-            filter: ["==", ["get", prop], name],
-          } as any);
+            filter: ["==", ["get", prop], name] as FilterSpecification,
+          });
 
           if (feats && feats.length) {
             const f = feats[0] as unknown as MapboxGeoJSONFeature;
-            const fid = toFeatureId((f as any).id);
+            const fid = toFeatureId(f.id);
             const props = (f.properties ?? {}) as Record<string, unknown>;
 
             if (level === "micromarkets" && fid !== null) {
