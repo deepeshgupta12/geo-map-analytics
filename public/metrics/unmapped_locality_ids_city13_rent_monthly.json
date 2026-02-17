@@ -1,0 +1,23 @@
+{
+  "cityId": 13,
+  "metric": "rent_monthly",
+  "reason": "LocalityID not found in dim_locality.csv (after dtype normalization)",
+  "unmappedRowCount": 1,
+  "uniqueUnmappedLocalityIdCount": 1,
+  "topUnmappedLocalityIds": [
+    {
+      "LocalityID": 16583,
+      "rows": 1
+    }
+  ],
+  "examples": [
+    {
+      "MonthKey": "2025-04-01",
+      "LocalityID": 16583,
+      "MicroMarketID": 271,
+      "MedianMonthlyRent": 40000.0,
+      "SampleSize": 1,
+      "FreshnessDate": "2025-04-14 12:32:01"
+    }
+  ]
+}
