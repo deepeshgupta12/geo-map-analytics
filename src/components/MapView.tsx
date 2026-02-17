@@ -2,7 +2,7 @@
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import mapboxgl, { AnyLayer, Map, MapMouseEvent, MapboxGeoJSONFeature } from "mapbox-gl";
-import type { ExpressionSpecification } from "mapbox-gl";
+import type { ExpressionSpecification, FitBoundsOptions, LngLatLike } from "mapbox-gl";
 import { TILESETS } from "@/config/tilesets";
 
 type PickInfo = {
@@ -45,6 +45,12 @@ type PinnedSelection = {
 const DEFAULT_CENTER: [number, number] = [72.8777, 19.076]; // Mumbai
 const DEFAULT_ZOOM = 10.5;
 
+const FIT_BOUNDS_OPTS: FitBoundsOptions = {
+  padding: 48,
+  duration: 650,
+  maxZoom: 13.75,
+};
+
 // Invisible “hit” layers for reliable picking
 const HIT_LAYERS = {
   city: "city-hit",
@@ -65,7 +71,6 @@ type LayerWithSourceLayer = AnyLayer & { "source-layer"?: string };
 type FeatureId = string | number;
 
 function getLayerId(f: MapboxGeoJSONFeature): string {
-  // Mapbox types mark `layer` as optional; runtime often has it, but we must guard for TS.
   return f.layer?.id ?? "";
 }
 
@@ -102,16 +107,121 @@ function getStrProp(props: Record<string, unknown> | null | undefined, key: stri
   return typeof v === "string" ? v : "";
 }
 
-function clamp(n: number, min: number, max: number) {
-  return Math.max(min, Math.min(max, n));
+/**
+ * Geometry helpers: compute bounds from Mapbox feature geometry.
+ * We keep this defensive because vector-tile features can vary.
+ */
+function isNumber(v: unknown): v is number {
+  return typeof v === "number" && Number.isFinite(v);
 }
 
-function isTypingTarget(el: EventTarget | null): boolean {
-  if (!el || !(el instanceof HTMLElement)) return false;
-  const tag = el.tagName.toLowerCase();
-  if (tag === "input" || tag === "textarea" || tag === "select") return true;
-  if (el.isContentEditable) return true;
-  return false;
+function isLngLatPair(v: unknown): v is [number, number] {
+  return Array.isArray(v) && v.length === 2 && isNumber(v[0]) && isNumber(v[1]);
+}
+
+function collectLngLatPairs(node: unknown, out: Array<[number, number]>) {
+  if (isLngLatPair(node)) {
+    out.push(node);
+    return;
+  }
+  if (Array.isArray(node)) {
+    for (const child of node) collectLngLatPairs(child, out);
+  }
+}
+
+function boundsFromGeometry(geometry: unknown): [[number, number], [number, number]] | null {
+  // Expect GeoJSON-like { type, coordinates }
+  if (!geometry || typeof geometry !== "object") return null;
+  const g = geometry as { type?: unknown; coordinates?: unknown };
+  if (typeof g.type !== "string") return null;
+
+  const pts: Array<[number, number]> = [];
+  collectLngLatPairs(g.coordinates, pts);
+  if (pts.length === 0) return null;
+
+  let minLng = Number.POSITIVE_INFINITY;
+  let minLat = Number.POSITIVE_INFINITY;
+  let maxLng = Number.NEGATIVE_INFINITY;
+  let maxLat = Number.NEGATIVE_INFINITY;
+
+  for (const [lng, lat] of pts) {
+    minLng = Math.min(minLng, lng);
+    minLat = Math.min(minLat, lat);
+    maxLng = Math.max(maxLng, lng);
+    maxLat = Math.max(maxLat, lat);
+  }
+
+  if (!Number.isFinite(minLng) || !Number.isFinite(minLat) || !Number.isFinite(maxLng) || !Number.isFinite(maxLat)) {
+    return null;
+  }
+
+  // Prevent fitBounds from choking on "flat" geometries
+  if (minLng === maxLng) {
+    minLng -= 0.001;
+    maxLng += 0.001;
+  }
+  if (minLat === maxLat) {
+    minLat -= 0.001;
+    maxLat += 0.001;
+  }
+
+  return [
+    [minLng, minLat],
+    [maxLng, maxLat],
+  ];
+}
+
+function fitToFeature(map: Map, feature: MapboxGeoJSONFeature) {
+  const b = boundsFromGeometry((feature as unknown as { geometry?: unknown }).geometry);
+  if (b) {
+    map.fitBounds(b, FIT_BOUNDS_OPTS);
+    return;
+  }
+  // Fallback: easeTo pointer location if geometry is missing
+  const lng = (feature as unknown as { properties?: Record<string, unknown> }).properties?.lng;
+  const lat = (feature as unknown as { properties?: Record<string, unknown> }).properties?.lat;
+  if (typeof lng === "number" && typeof lat === "number") {
+    map.easeTo({ center: [lng, lat] as LngLatLike, zoom: Math.max(map.getZoom(), 12), duration: 500 });
+  }
+}
+
+function formatDelta(vNow: number | null, vPrev: number | null) {
+  if (vNow === null || vPrev === null) return { abs: "-", pct: "-" };
+  const abs = vNow - vPrev;
+  const pct = vPrev !== 0 ? (abs / vPrev) * 100 : null;
+
+  const absStr = (abs >= 0 ? "+" : "") + fmtMoney(Math.round(abs));
+  const pctStr = pct === null ? "-" : `${abs >= 0 ? "+" : ""}${pct.toFixed(1)}%`;
+
+  return { abs: absStr, pct: pctStr };
+}
+
+function buildSparklinePath(values: number[], w: number, h: number) {
+  if (values.length < 2) return "";
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+
+  const pad = 2;
+  const innerW = Math.max(1, w - pad * 2);
+  const innerH = Math.max(1, h - pad * 2);
+
+  const denom = max - min;
+  const normY = (v: number) => {
+    if (denom === 0) return pad + innerH / 2;
+    // invert so higher value is "higher" on chart
+    const t = (v - min) / denom;
+    return pad + (1 - t) * innerH;
+  };
+
+  const step = innerW / (values.length - 1);
+  let d = `M ${pad} ${normY(values[0]).toFixed(2)}`;
+
+  for (let i = 1; i < values.length; i++) {
+    const x = pad + step * i;
+    const y = normY(values[i]);
+    d += ` L ${x.toFixed(2)} ${y.toFixed(2)}`;
+  }
+  return d;
 }
 
 export default function MapView() {
@@ -157,7 +267,7 @@ export default function MapView() {
   const [pinned, setPinned] = useState<PinnedSelection | null>(null);
 
   // -----------------------------
-  // V2.1 Step 1: Timeline + Play
+  // V2.1: Timeline + Play
   // -----------------------------
   const [isPlaying, setIsPlaying] = useState(false);
   const isPlayingRef = useRef(false);
@@ -187,9 +297,22 @@ export default function MapView() {
     };
   }, []);
 
-  // Utility: stop playback (used by map interaction handlers + UI)
+  // Stop playback helper
   const stopPlayback = () => {
     if (isPlayingRef.current) setIsPlaying(false);
+  };
+
+  const resetView = () => {
+    stopPlayback();
+    const map = mapRef.current;
+    if (!map) return;
+    map.easeTo({
+      center: DEFAULT_CENTER as unknown as LngLatLike,
+      zoom: DEFAULT_ZOOM,
+      bearing: enable3D ? -20 : 0,
+      pitch: enable3D ? 60 : 0,
+      duration: 650,
+    });
   };
 
   // -----------------------------
@@ -291,67 +414,6 @@ export default function MapView() {
       window.clearInterval(id);
     };
   }, [isPlaying, monthOptions, playSpeedMs, loopPlay, enableChoropleth]);
-
-  // -----------------------------
-  // v2.1.1 Step C: stop playback + clamp month on level switch
-  // - Stop playback even if something changes choroplethLevel programmatically
-  // - Reset month to latest month of the newly selected level (when available)
-  // -----------------------------
-  useEffect(() => {
-    stopPlayback();
-
-    // Optional: clear hover/click (prevents "stale" inspector state on level change)
-    setHoverInfo(null);
-    setClickInfo(null);
-
-    const doc = choroplethLevel === "micromarkets" ? mmDoc : locDoc;
-    const latest = doc?.months?.[doc.months.length - 1];
-    if (latest) setMetricMonth(latest);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [choroplethLevel]);
-
-  // -----------------------------
-  // v2.1.1 Step A: keyboard shortcuts
-  // - Space: play/pause
-  // - Left/Right: prev/next month
-  // - Shift + Left/Right: jump by 3
-  // - Ignore when typing in inputs/selects/textareas/contenteditable
-  // -----------------------------
-  useEffect(() => {
-    const onKeyDown = (ev: KeyboardEvent) => {
-      if (isTypingTarget(ev.target)) return;
-
-      const hasMonths = monthOptions.length > 0;
-      const canPlay = enableChoropleth && monthOptions.length >= 2;
-
-      // Space toggles play/pause
-      if (ev.code === "Space") {
-        if (!canPlay) return;
-        ev.preventDefault();
-        setIsPlaying((p) => !p);
-        return;
-      }
-
-      // Arrow keys move month
-      if (ev.key !== "ArrowLeft" && ev.key !== "ArrowRight") return;
-      if (!enableChoropleth || !hasMonths) return;
-
-      ev.preventDefault();
-      stopPlayback();
-
-      const step = ev.shiftKey ? 3 : 1;
-      const curIdx = monthOptions.indexOf(metricMonth);
-      const safeIdx = curIdx >= 0 ? curIdx : monthOptions.length - 1;
-
-      const delta = ev.key === "ArrowRight" ? step : -step;
-      const nextIdx = clamp(safeIdx + delta, 0, monthOptions.length - 1);
-      const next = monthOptions[nextIdx];
-      if (next) setMetricMonth(next);
-    };
-
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [enableChoropleth, monthOptions, metricMonth]);
 
   // -----------------------------
   // Map init
@@ -581,6 +643,8 @@ export default function MapView() {
             featureId: fid,
             lngLat: { lng: e.lngLat.lng, lat: e.lngLat.lat },
           });
+
+          fitToFeature(m, f);
         } else if (layer === HIT_LAYERS.localities && fid !== null) {
           const lname = getStrProp(props, "LocalityName") || "";
           if (lname) {
@@ -591,6 +655,8 @@ export default function MapView() {
               featureId: fid,
               lngLat: { lng: e.lngLat.lng, lat: e.lngLat.lat },
             });
+
+            fitToFeature(m, f);
           }
         }
       };
@@ -598,17 +664,19 @@ export default function MapView() {
       map.on("mousemove", onMove);
       map.on("click", onClick);
 
-      // Keep Escape behavior local to map lifecycle: clears pinned and stops playback
-      const onEsc = (ev: KeyboardEvent) => {
+      const onKeyDown = (ev: KeyboardEvent) => {
         if (ev.key === "Escape") {
           stopPlayback();
           setPinned(null);
         }
+        if (ev.key === "r" || ev.key === "R") {
+          resetView();
+        }
       };
-      window.addEventListener("keydown", onEsc);
+      window.addEventListener("keydown", onKeyDown);
 
       map.once("remove", () => {
-        window.removeEventListener("keydown", onEsc);
+        window.removeEventListener("keydown", onKeyDown);
         map.off("dragstart", stop);
         map.off("zoomstart", stop);
         map.off("rotatestart", stop);
@@ -626,7 +694,7 @@ export default function MapView() {
       mapRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [token, vectorSources]);
+  }, [token, vectorSources, lightPreset, enable3D]);
 
   // -----------------------------
   // Keep pinned highlight filters in sync
@@ -869,13 +937,6 @@ export default function MapView() {
     return pinned.level === "micromarkets" ? mmDoc : locDoc;
   }, [pinned, mmDoc, locDoc]);
 
-  const pinnedCurrent = useMemo(() => {
-    if (!pinned || !pinnedDoc || !metricMonth) return null;
-    const monthMap = pinnedDoc.byMonth?.[metricMonth];
-    if (!monthMap) return null;
-    return monthMap[pinned.joinKey] ?? null;
-  }, [pinned, pinnedDoc, metricMonth]);
-
   const pinnedSeries = useMemo(() => {
     if (!pinned || !pinnedDoc) return [];
     const months = pinnedDoc.months ?? [];
@@ -888,6 +949,32 @@ export default function MapView() {
       };
     });
   }, [pinned, pinnedDoc]);
+
+  const pinnedCurrent = useMemo(() => {
+    if (!pinned || !pinnedDoc || !metricMonth) return null;
+    const monthMap = pinnedDoc.byMonth?.[metricMonth];
+    if (!monthMap) return null;
+    return monthMap[pinned.joinKey] ?? null;
+  }, [pinned, pinnedDoc, metricMonth]);
+
+  const pinnedDelta = useMemo(() => {
+    if (!pinned || !metricMonth) return { abs: "-", pct: "-" };
+
+    const idx = pinnedSeries.findIndex((r) => r.month === metricMonth);
+    if (idx <= 0) return { abs: "-", pct: "-" };
+
+    const now = pinnedSeries[idx]?.v ?? null;
+    const prev = pinnedSeries[idx - 1]?.v ?? null;
+    return formatDelta(now, prev);
+  }, [pinned, metricMonth, pinnedSeries]);
+
+  const sparkline = useMemo(() => {
+    const values = pinnedSeries.map((r) => r.v).filter((v): v is number => typeof v === "number" && Number.isFinite(v));
+    const w = 160;
+    const h = 44;
+    const d = buildSparklinePath(values, w, h);
+    return { w, h, d, has: d.length > 0 };
+  }, [pinnedSeries]);
 
   return (
     <div style={{ display: "grid", gridTemplateColumns: "1fr 420px", height: "100vh" }}>
@@ -952,22 +1039,14 @@ export default function MapView() {
               </select>
             </div>
 
-            {/* V2.1 Step 1: Timeline slider + Play */}
+            {/* Timeline slider + Play */}
             <div style={{ padding: 10, border: "1px solid #e5e7eb", borderRadius: 8 }}>
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
                 <div style={{ fontSize: 12, opacity: 0.85 }}>Timeline</div>
-                <div style={{ fontSize: 12, fontWeight: 600 }}>
-                  {metricMonth ? parseMonthLabel(metricMonth) : "-"}
-                </div>
+                <div style={{ fontSize: 12, fontWeight: 600 }}>{metricMonth ? parseMonthLabel(metricMonth) : "-"}</div>
               </div>
 
-              {/* Step B: clearer scrub feedback */}
-              <div style={{ marginTop: 6, display: "flex", justifyContent: "space-between", fontSize: 11, opacity: 0.65 }}>
-                <div>{monthOptions[0] ? parseMonthLabel(monthOptions[0]) : "-"}</div>
-                <div>{monthOptions.length ? parseMonthLabel(monthOptions[monthOptions.length - 1]) : "-"}</div>
-              </div>
-
-              <div style={{ marginTop: 6 }}>
+              <div style={{ marginTop: 8 }}>
                 <input
                   type="range"
                   min={0}
@@ -985,7 +1064,7 @@ export default function MapView() {
                 />
               </div>
 
-              <div style={{ marginTop: 8, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+              <div style={{ marginTop: 10, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
                 <button
                   onClick={() => {
                     if (!enableChoropleth) return;
@@ -1032,9 +1111,8 @@ export default function MapView() {
                 Loop playback
               </label>
 
-              {/* Step B: helper text */}
-              <div style={{ marginTop: 8, fontSize: 12, opacity: 0.72, lineHeight: 1.35 }}>
-                Controls: Space = Play/Pause, ←/→ = month, Shift+←/→ = jump 3 months. Playback stops on map interaction or manual month change.
+              <div style={{ marginTop: 8, fontSize: 12, opacity: 0.7 }}>
+                Playback stops on map interaction (drag/zoom/click) or manual month change.
               </div>
             </div>
           </div>
@@ -1047,8 +1125,7 @@ export default function MapView() {
                 Month: <span style={{ fontWeight: 600 }}>{metricMonth ? parseMonthLabel(metricMonth) : "-"}</span>
               </div>
               <div>
-                Range (psf):{" "}
-                <span style={{ fontWeight: 600 }}>{legend.min === null ? "-" : fmtMoney(legend.min)} </span>
+                Range (psf): <span style={{ fontWeight: 600 }}>{legend.min === null ? "-" : fmtMoney(legend.min)} </span>
                 to <span style={{ fontWeight: 600 }}>{legend.max === null ? "-" : fmtMoney(legend.max)}</span>
               </div>
               <div>
@@ -1082,7 +1159,7 @@ export default function MapView() {
             </div>
           </div>
 
-          {/* V2 Pinned details */}
+          {/* Pinned details */}
           <div style={{ marginTop: 12, paddingTop: 10, borderTop: "1px solid #e5e7eb" }}>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
               <div style={{ fontWeight: 600 }}>Pinned (click a Micromarket/Locality polygon)</div>
@@ -1127,14 +1204,58 @@ export default function MapView() {
                 <div>
                   Month value (psf):{" "}
                   <span style={{ fontWeight: 600 }}>
-                    {pinnedCurrent?.v !== undefined && typeof pinnedCurrent?.v === "number"
-                      ? fmtMoney(pinnedCurrent.v)
-                      : "-"}
+                    {pinnedCurrent?.v !== undefined && typeof pinnedCurrent?.v === "number" ? fmtMoney(pinnedCurrent.v) : "-"}
                   </span>{" "}
                   <span style={{ opacity: 0.85 }}>
-                    (n:{" "}
-                    {pinnedCurrent?.n !== undefined && typeof pinnedCurrent?.n === "number" ? pinnedCurrent.n : "-"})
+                    (n: {pinnedCurrent?.n !== undefined && typeof pinnedCurrent?.n === "number" ? pinnedCurrent.n : "-"})
                   </span>
+                </div>
+
+                <div style={{ display: "flex", gap: 10, alignItems: "center", marginTop: 6 }}>
+                  <div style={{ fontWeight: 600 }}>Trend</div>
+                  <div style={{ fontSize: 12, opacity: 0.85 }}>
+                    Δ vs prev: <span style={{ fontWeight: 600 }}>{pinnedDelta.abs}</span>{" "}
+                    <span style={{ opacity: 0.85 }}>({pinnedDelta.pct})</span>
+                  </div>
+                </div>
+
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <div
+                    style={{
+                      width: sparkline.w,
+                      height: sparkline.h,
+                      border: "1px solid #e5e7eb",
+                      borderRadius: 8,
+                      background: "white",
+                      overflow: "hidden",
+                    }}
+                    title="Pinned time-series sparkline"
+                  >
+                    <svg width={sparkline.w} height={sparkline.h}>
+                      {sparkline.has ? (
+                        <path d={sparkline.d} fill="none" stroke="currentColor" strokeWidth={2} />
+                      ) : (
+                        <text x="10" y="26" fontSize="12" opacity="0.6">
+                          Not enough data
+                        </text>
+                      )}
+                    </svg>
+                  </div>
+
+                  <button
+                    onClick={resetView}
+                    style={{
+                      fontSize: 12,
+                      padding: "8px 10px",
+                      border: "1px solid #e5e7eb",
+                      borderRadius: 8,
+                      background: "white",
+                      cursor: "pointer",
+                    }}
+                    title="Reset view (R)"
+                  >
+                    Reset view (R)
+                  </button>
                 </div>
 
                 <div style={{ marginTop: 6, fontWeight: 600 }}>Time series</div>
@@ -1158,7 +1279,18 @@ export default function MapView() {
                         {pinnedSeries.map((r) => {
                           const isActive = r.month === metricMonth;
                           return (
-                            <tr key={r.month} style={{ background: isActive ? "#F9FAFB" : "transparent" }}>
+                            <tr
+                              key={r.month}
+                              style={{
+                                background: isActive ? "#F9FAFB" : "transparent",
+                                cursor: "pointer",
+                              }}
+                              title="Click to jump to this month"
+                              onClick={() => {
+                                stopPlayback();
+                                setMetricMonth(r.month);
+                              }}
+                            >
                               <td style={{ padding: "8px 10px", borderBottom: "1px solid #f3f4f6" }}>
                                 {parseMonthLabel(r.month)}
                               </td>
@@ -1191,7 +1323,7 @@ export default function MapView() {
           </div>
         </div>
 
-        {/* V0 Controls */}
+        {/* Map controls */}
         <div style={{ marginBottom: 12 }}>
           <div style={{ fontWeight: 600, marginBottom: 6 }}>Map controls</div>
 
@@ -1205,12 +1337,29 @@ export default function MapView() {
             </select>
           </div>
 
-          <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <label style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
             <input type="checkbox" checked={enable3D} onChange={(e) => setEnable3D(e.target.checked)} />
             3D view (pitch + terrain)
           </label>
+
+          <button
+            onClick={resetView}
+            style={{
+              width: "100%",
+              fontSize: 12,
+              padding: "10px 12px",
+              border: "1px solid #e5e7eb",
+              borderRadius: 8,
+              background: "white",
+              cursor: "pointer",
+            }}
+            title="Reset view (R)"
+          >
+            Reset view (R)
+          </button>
         </div>
 
+        {/* Inspect target */}
         <div style={{ marginBottom: 10 }}>
           <div style={{ fontWeight: 600, marginBottom: 6 }}>Inspect target</div>
           <select
@@ -1231,6 +1380,7 @@ export default function MapView() {
           </select>
         </div>
 
+        {/* Layer visibility */}
         <div style={{ marginBottom: 12 }}>
           <div style={{ fontWeight: 600, marginBottom: 6 }}>Layer visibility</div>
 
@@ -1255,6 +1405,7 @@ export default function MapView() {
           </label>
         </div>
 
+        {/* Hover / Click debug */}
         <div style={{ marginBottom: 12 }}>
           <div style={{ fontWeight: 600 }}>Hover</div>
           {hoverInfo ? <pre style={{ fontSize: 12, whiteSpace: "pre-wrap" }}>{safeJson(hoverInfo)}</pre> : <div style={{ fontSize: 12, opacity: 0.7 }}>Hover a feature on the map…</div>}
@@ -1283,6 +1434,9 @@ export default function MapView() {
           </div>
           <div style={{ marginTop: 8 }}>
             Inspector hit-testing uses transparent hit layers (thicker lines / larger points) so hover/click works reliably.
+          </div>
+          <div style={{ marginTop: 8 }}>
+            Keyboard: <code>R</code> reset view, <code>Esc</code> clear pinned.
           </div>
         </div>
       </div>
