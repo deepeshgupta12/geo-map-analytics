@@ -1,327 +1,236 @@
-# Geo Map Analytics (Mapbox + Vector Tiles + Dynamic Choropleth)
+# Geo Map Analytics
 
-> A lightweight, developer-friendly geospatial analytics UI that renders **city → micromarket → locality → roads → projects** layers from **Mapbox vector tiles**, overlays **monthly metrics** as a **dynamic choropleth**, and supports **A/B pinned comparisons** + **exports (PNG + CSV) + shareable URLs**.
+Map-first real-estate analytics for Mumbai, built on Mapbox GL JS and Next.js. The map drills down with the zoom: **micromarkets** at city level, the **localities** of the micromarket you are looking at from z12, and the **projects** of the locality you are in from z14. Monthly metrics (asking price, rent) are painted as a choropleth with a smooth, GPU cross-faded timeline, project concentration can be shown as a heatmap, and any area can be pinned for an A/B comparison. Every view is a shareable URL.
 
----
-
-## 🚩 Problem statement
-
-Real-estate and city intelligence teams need a fast way to:
-- **Visually explore** polygon layers (micromarkets/localities) and point/line layers (projects/roads)
-- **Overlay time-series metrics** (e.g., asking price psf) over geographies
-- **Compare two areas** side-by-side (A vs B)
-- **Share** the exact view/state with stakeholders
-- **Export** snapshots and data for quick reporting
-
-Traditional dashboards are slow for geospatial exploration, and GIS tools are overkill for most PM/ops/sales workflows.
+![Night 3D city view with the micromarket choropleth](docs/images/city-night-3d.jpg)
 
 ---
 
-## ✅ Solution (what this repo delivers)
+## Screenshots
 
-This product provides:
-- **Map-first analytics UI** built on Mapbox GL
-- **Dynamic choropleth** using **quantile buckets** (computed from full-month distribution)
-- **Month timeline slider + autoplay** (with loop + speed controls)
-- **Pinned compare A/B**
-  - normal click = **Pin A**
-  - Shift+Click = **Pin B**
-  - deltas vs prev month + sparklines
-- **Shareable URL state**
-  - metric / level / month / pins / basemap / 3D / choropleth encoded as query params
-- **Exports (V3.1)**
-  - **PNG snapshot** of the current map view
-  - **CSV export** of pinned A/B time-series
-  - **Copy share URL** to clipboard
+| | |
+|---|---|
+| ![Hovering a micromarket highlights it](docs/images/hover-micromarket.jpg) Hover highlights a micromarket; labels are placed at computed centroids. | ![Localities of the focused micromarket during playback](docs/images/localities-playback.jpg) Inside a micromarket: only its localities are painted, timeline playing. |
+| ![Project concentration heatmap](docs/images/heatmap.jpg) Heatmap of ~31k project locations. | ![Project dots inside a locality](docs/images/projects-band.jpg) Projects of the focused locality, coloured by status. |
+| ![Day light with the faded basemap theme](docs/images/day-faded.jpg) Day light, faded theme: the palette flips so the darkest step is the highest value. | |
 
 ---
 
-## 👥 Who is this product viable for?
+## Problem statement
 
-### Primary audiences
-- **Sales / Pre-sales**: quickly compare “where to pitch” and show evidence-backed pricing dynamics.
-- **Ops / Supply teams**: track locality/micromarket movement and anomalies.
-- **Research / Analytics**: validate hypotheses visually before deeper statistical work.
-- **Product & Growth**: spot demand/price clusters and guide personalization widgets.
-- **Leadership / Stakeholders**: quick view + export for decks and weekly reviews.
+Real-estate and city-intelligence teams need a fast way to:
 
-### Environments
-- Internal analytics tool
-- “City intelligence” cockpit for large real-estate marketplaces
-- Embedded module inside CRM (future direction)
+- explore polygon layers (micromarkets, localities) and point layers (projects) without a GIS tool,
+- overlay time-series metrics (asking price per sq ft, rent) on those geographies and watch them move month by month,
+- compare two areas side by side,
+- share the exact view with stakeholders and export it for a deck.
 
----
+Dashboards are slow for spatial exploration and GIS suites are overkill for sales, ops and product workflows. This repo is the lightweight middle ground.
 
-## 🧱 What we have built (capabilities)
+### Who it is for
 
-### 1) Map + layers
-- City outline
-- Micromarkets polygons
-- Localities polygons
-- Roads lines
-- Projects points
-- Invisible “hit layers” for precise hover/click picking
-
-### 2) Inspector panel
-- Layer toggles
-- Inspect target dropdown (localities / micromarkets / projects / roads / city)
-- Hover + Click debug panels (safe JSON)
-
-### 3) Choropleth (v2.3)
-- Metric selection
-- Level selection (micromarkets join via feature id; localities join via LocalityName)
-- Month selection + timeline slider + autoplay
-- Legend shows distribution, missing counts, min/max and bucket ranges
-- Feature-state applied **only to visible polygons** and cached
-
-### 4) Compare (pins)
-- Pin A + Pin B
-- Current values, n counts (if present), deltas vs previous month
-- Sparklines for quick trend sense
-- A − B current-month delta
-
-### 5) Share + export (v3.1)
-- Copy share URL
-- Export PNG (map snapshot)
-- Export CSV for pinned series
+- **Sales and pre-sales:** compare where to pitch with evidence-backed price dynamics.
+- **Ops and supply teams:** track locality and micromarket movement, spot anomalies.
+- **Research and analytics:** validate hypotheses visually before statistical work.
+- **Product and growth:** find demand and price clusters.
+- **Leadership:** a quick view plus exports for weekly reviews.
 
 ---
 
-## 🛠 Tech stack
+## What it does
 
-- **Next.js 16** (App Router)
-- **React 18**
-- **TypeScript**
-- **Mapbox GL JS**
-- **Mapbox Vector Tilesets**
-- **Static JSON** metrics docs (public assets)
-- **ESLint** for quality gates
+### Zoom-driven drill-down
+- Below **z12** the four micromarkets are painted. From **z12** the localities of the *focused* micromarket appear and the other micromarkets are dimmed. From **z14** the project dots of the *focused* locality appear.
+- Focus follows where you are looking: the cursor position when the pointer is over the map (wheel zoom anchors there), otherwise the screen centre. Clicking a polygon flies into it (centred on its centroid, straight into the next band) and keeps it focused until you move the map yourself.
+- Breadcrumb in the top-left (city › micromarket › locality, with the project count in view) and the drill-down panel show the current focus. The restriction toggles can be switched off to see every locality or every project at that zoom.
+- Locality membership is decided **spatially** (centroid inside the micromarket polygon) with the dimension table as fallback, so a locality is never hidden because of a mismatched id.
+
+### Choropleth and timeline
+- Metrics: asking ₹/sqft, rent ₹/sqft, rent ₹/month, at micromarket or locality level (auto by zoom, or forced).
+- Quantile buckets, with the colour scale **fixed across all months** by default so playback is comparable (or re-bucketed per month).
+- Month changes **cross-fade on the GPU** between two fill layers instead of snapping. Playback keeps running while you pan and zoom and the level switches mid-play. Space plays and pauses.
+- **Carry-forward:** locality data is sparse (roughly a quarter of localities have a value in a given month, half ever do). A month without a value is painted with the latest earlier value and the hover card says which month it came from. Switchable.
+- Amber sequential ramp validated against the dark basemap; on dark light presets the brightest step is the highest value, on light presets the darkest. Emissive paint keeps colours vivid at night. A floating legend sits on the map.
+- Optional 3D bars: extrude polygons by value.
+
+### Heatmap
+- Kernel-density heat of all project points (~31k), tuned so dense cores read instead of saturating; the choropleth dims while it is on.
+
+### Hover, click, compare
+- Hovering a polygon or project highlights it (cyan outline and tint) with a card showing the metric, count and month; the card refreshes as the timeline moves.
+- Click pins **A**, Shift+Click pins **B**: current value, n, delta vs previous month, sparkline, A − B. Esc clears.
+- Search any locality or micromarket by name and jump to it (pins A).
+
+### Basemap
+- Mapbox Standard with **night** light and **3D buildings** by default; dawn/day/dusk/night, default/faded/monochrome themes, place/road/POI label toggles, optional terrain.
+
+### Share and export
+- The URL carries metric, level, month, light, theme, 3D, heatmap, scale, carry-forward, pins and the **camera** (`cam=lng,lat,zoom,pitch,bearing`). Only non-default values are written, and view params are versioned (`v=4`) so stale URLs cannot override new defaults.
+- PNG snapshot of the map, state JSON, CSV of the pinned series, copy share URL.
+
+### Keyboard shortcuts
+`Space` play/pause · `R` reset view · `P` PNG · `J` state JSON · `C` pinned CSV · `Esc` clear pins. Shortcuts are ignored while typing in a field.
 
 ---
 
-## 📁 Repo structure (high-level)
+## Tech stack
 
-- `src/components/MapView.tsx`  
-  Main UI: map init, layer config, choropleth logic, pins compare, inspector controls, URL state.
-- `src/lib/quantiles.ts`  
-  Quantile stop computation + bucket formatting helpers.
-- `src/config/metrics.ts`  
-  Metric definitions, labels, file paths for per-level metrics docs.
-- `src/config/tilesets.ts`  
-  Tileset IDs + source-layers for Mapbox vector sources.
-- `src/lib/export.ts`  
-  Export utilities (PNG snapshot, CSV generation, clipboard helpers).
-- `public/dim/*.json`  
-  Search dimensions (localities/micromarkets) for jump-to.
+- **Next.js 16** (App Router, Turbopack, React Compiler) · **React 19** · **TypeScript**
+- **Mapbox GL JS 3.18** with the **Mapbox Standard** style (slots, light presets, 3D objects, emissive paint, feature-state, heatmap, fill-extrusion)
+- **Mapbox vector tilesets** for city, micromarkets, localities, roads and projects
+- Static JSON under `public/` for dimensions, metrics and project counts (no server)
+- ESLint 9
 
 ---
 
-## 🧪 How to run locally
+## Repository structure
 
-1) Install deps
-```bash
-npm i
 ```
-
-2) Add Mapbox token
-Create `.env.local`:
-```bash
-NEXT_PUBLIC_MAPBOX_TOKEN=YOUR_MAPBOX_TOKEN
-```
-
-3) Start dev server
-```bash
-npm run dev
-```
-
-4) Lint + build
-```bash
-npm run lint
-npm run build
+src/
+  app/
+    layout.tsx, page.tsx, globals.css      # shell, popup + control styling
+  components/
+    MapView.tsx                            # the app: map init, drill-down, timeline, panel, URL state
+  config/
+    layers.ts                              # zoom bands, source/layer ids, palettes, status colours
+    metrics.ts                             # metric definitions and file paths
+    tilesets.ts                            # tileset ids (from env) and source-layer names
+  lib/
+    mapLayers.ts                           # adds all sources/layers, preset recolouring, filters
+    choropleth.ts                          # ChoroplethEngine: feature-state, two-slot cross-fade, 3D bars
+    featureIndex.ts                        # polygon index: centroids, bboxes, spatial membership, labels
+    carryForward.ts                        # fills sparse months with the latest earlier value
+    quantiles.ts                           # quantile stops, bucket ranges, value collection
+    export.ts, types.ts
+scripts/
+  build_dims_public.py                     # public/dim/*.json from data/raw
+  build_metrics_v2.py                      # public/metrics/*.json from the monthly workbooks
+  build_project_counts.mjs                 # public/dim/project_counts_city13.json from the project tiles
+  tileset_layers.mjs                       # prints the source-layer ids of each tileset
+public/
+  dim/      localities, micromarkets, project counts
+  metrics/  <metric>_<level>.json
+docs/images/                               # screenshots used above
 ```
 
 ---
 
-## 🧩 Data model (metrics doc)
+## Running locally
 
-Metrics are loaded from JSON files (one per `metricKey` x `level`) in `public/`.
+1. Install dependencies
 
-Shape (simplified):
+   ```bash
+   npm i
+   ```
+
+2. Create `.env.local` with a Mapbox token and the tileset ids
+
+   ```bash
+   NEXT_PUBLIC_MAPBOX_TOKEN=pk....
+   NEXT_PUBLIC_TILESET_CITY=<user>.<id>
+   NEXT_PUBLIC_TILESET_MICROMARKETS=<user>.<id>
+   NEXT_PUBLIC_TILESET_LOCALITIES=<user>.<id>
+   NEXT_PUBLIC_TILESET_ROADS=<user>.<id>
+   NEXT_PUBLIC_TILESET_PROJECTS=<user>.<id>
+   ```
+
+3. Start the dev server and open http://localhost:3000
+
+   ```bash
+   npm run dev
+   ```
+
+4. Quality gates
+
+   ```bash
+   npx tsc --noEmit
+   npm run lint
+   npm run build
+   ```
+
+Data refresh (optional): `python scripts/build_dims_public.py`, `python scripts/build_metrics_v2.py`, `node scripts/build_project_counts.mjs`, `npm run tileset:layers`.
+
+---
+
+## Data model
+
+### Tilesets (source layers and fields)
+
+| Layer | Source layer | Fields | Notes |
+|---|---|---|---|
+| city | `mumbai_city` | CityName | outline only |
+| micromarkets | `mumbai_micro_markets` | CityID, MicroMarketName | feature id = micromarket id (100, 102, 270, 271) |
+| localities | `mumbai_localities` | CityID, LocalityName | feature id = locality id in `public/dim` |
+| roads | `mumbai_roads` | CityID, RoadName | optional layer |
+| projects | `mumbai_projects` | CityID, LocalityID, MicroMarketID, ProjectName, Status | ~31k points, max zoom 11 |
+
+### Join keys
+- **Micromarkets:** metric keys are the feature ids.
+- **Localities:** metric keys are locality **names**. The app joins by the canonical name from `public/dim/localities_city13.json` looked up by feature id, then falls back to a normalised name match (case, whitespace, punctuation), because tile names occasionally differ from the metric keys.
+- **Projects → locality:** `LocalityID` equals the locality feature id, so project filtering needs no name matching.
+
+### Metrics document
+
 ```ts
 type MetricsDoc = {
   cityId: number;
   metric: string;
-  level: "micromarkets" | "localities";
-  months: string[]; // e.g. ["2025-01-01", ...]
-  byMonth: Record<string, Record<string, { v: number; n?: number }>>;
+  level: string;
+  months: string[];                       // "2025-01-01" …
+  byMonth: Record<string, Record<string, { v: number | null; n?: number | null }>>;
 };
 ```
 
-Join keys:
-- **micromarkets**: join via **feature id** (Mapbox feature id)
-- **localities**: join via feature property **LocalityName**
+`carryForward()` derives a filled document where a missing month reuses the latest earlier value and tags it with `asOf`.
+
+### Zoom bands (`src/config/layers.ts`)
+
+| Constant | Value | Meaning |
+|---|---|---|
+| `Z_LOC` | 12 | localities (and locality choropleth) from here |
+| `Z_PROJ` | 14 | project dots from here |
+| `Z_FADE` | 0.6 | width of the opacity fade around each threshold |
 
 ---
 
-## 🔎 Key implementation highlights (with snippets)
+## Implementation notes and problems solved
 
-### A) Shareable URL state
-The app reads query params at mount and writes state back via `replaceState`.
-```ts
-useEffect(() => {
-  const sp = new URLSearchParams(window.location.search);
-  // metric / level / month / light / 3D / ch / pins
-  // ...
-}, []);
+- **Two-slot cross-fade.** Feature-state changes cannot be transitioned, so each level has two fill layers (`a`, `b`). A month change writes the new values into the hidden slot's state key and animates `fill-opacity` on both; the GPU does the blend.
+- **Hidden layers never get paint changes.** Mapbox does not recalculate layers with `visibility: none`, so a paint change on one leaves a transition pending forever; the map then repaints continuously and never fires `idle`. Preset recolouring and the 3D-bar paint are applied only to visible layers.
+- **Style reloads.** Changing a Standard-style config (theme, light) can reload the basemap. A `style.load` / `styledata` watcher re-adds missing layers and bumps an epoch so every map effect re-applies itself.
+- **Labels without duplicates.** Polygon labels on vector tiles repeat per tile. The app merges tile pieces per feature id (area-weighted centroids) into a GeoJSON label source; the same index drives search, click-to-zoom extents and spatial micromarket membership.
+- **Focus from the cursor.** Wheel zoom anchors at the cursor, so the micromarket under the cursor is focused, not the one under the screen centre; a click-set focus is sticky until the user moves the map.
+- **Standard style slots and emissive paint.** Data layers sit in the `middle` and `top` slots so basemap labels stay readable and 3D buildings rise through the choropleth; emissive strength keeps colours vivid under the night light.
+- **Join robustness.** Canonical names by feature id, normalised fallback, spatial membership and carry-forward together lifted locality coverage in a micromarket from ~16% to ~58% of polygons.
+- **Dev tooling.** Turbopack is pinned to the project root (`turbopack.root`) because a stray lockfile in the home directory made it pick the wrong root and serve stale chunks.
 
-useEffect(() => {
-  const sp = new URLSearchParams(window.location.search);
-  sp.set("metric", metricKey);
-  sp.set("level", choroplethLevel);
-  // ...
-  window.history.replaceState({}, "", `${window.location.pathname}?${sp.toString()}`);
-}, [metricKey, choroplethLevel, metricMonth, lightPreset, enable3D, enableChoropleth, pinA, pinB]);
-```
+### Verification approach
 
-### B) Pin A vs Pin B (Shift+Click)
-We use robust Shift detection and cache modifier state on mousedown to avoid browser inconsistencies.
-```ts
-const onMouseDown = (e: MapMouseEvent) => {
-  const oe = e.originalEvent;
-  shiftDownRef.current = isShiftPressed(oe) || isShiftPressed(e);
-};
-
-const onClick = (e: MapMouseEvent) => {
-  const assignToB = isShiftPressed(e.originalEvent) || shiftDownRef.current === true;
-  shiftDownRef.current = false;
-
-  if (assignToB) setPinB(next);
-  else setPinA(next);
-};
-```
-
-### C) Choropleth via feature-state (visible-only)
-We compute quantile stops once per month distribution, and apply feature-state only to rendered polygons.
-```ts
-const features = map.queryRenderedFeatures({ layers: [fillLayer] });
-for (const f of features) {
-  const fid = toFeatureId(f.id);
-  if (fid === null) continue;
-
-  const joinKey = isMm ? String(fid) : String((f.properties as any)?.LocalityName ?? "");
-  const bucket = byMonth[joinKey];
-
-  map.setFeatureState(
-    { source: sourceId, sourceLayer, id: fid },
-    { v: Number.isFinite(bucket?.v) ? bucket.v : null, n: bucket?.n ?? null }
-  );
-}
-```
+Headless Chrome is driven over the DevTools protocol (no extra packages): the driver waits for the map, moves the camera, dispatches real mouse, wheel and key events, captures screenshots and reads per-layer render counts, feature-state and Mapbox internals. The map instance is exposed as `window.__gmMap` and a debug object as `window.__gmDebug` for this purpose.
 
 ---
 
-## 🖼️ Image snapshots
+## Version history
 
-You mentioned you shared snapshots earlier. To include them in the README:
-1) Create a folder: `docs/images/`
-2) Add your images (e.g. `choropleth.png`, `pins-compare.png`, `export.png`)
-3) Reference them here:
-
-```md
-![Choropleth + Legend](docs/images/choropleth.png)
-![Pinned A/B Compare](docs/images/pins-compare.png)
-![Export Actions](docs/images/export.png)
-```
-
-> Note: I can’t embed those images here unless they exist in the repo path.
+- **V1** basemap and layers, hover/click inspector.
+- **V2** inspect target, layer toggles, reset view, 3D toggle.
+- **V2.3** dynamic choropleth, quantile legend, pins A/B with deltas and sparklines, URL state.
+- **V3.1** PNG snapshot, CSV of pinned series, copy share URL.
+- **V4** zoom-driven drill-down (micromarkets → localities → projects), project heatmap, night + 3D default, GPU cross-faded timeline with a fixed scale, validated amber palette with emissive paint, computed labels, panel fixes (shortcuts while typing, stale exports, search), performance (no endless repaint), camera in the share URL, modular layer/engine/index code.
+- **V4.1** night default survives stale URLs, playback follows zoom, spatial membership, canonical-name joins, carry-forward, cyan hover highlight that survives camera moves, click-to-zoom into the next band with sticky focus, cursor-based focus, per-locality project counts script.
 
 ---
 
-## 🧠 Problems we faced (and how we solved them)
+## Roadmap
 
-### 1) Shift+Drag box zoom conflict 🧩
-**Problem:** Mapbox default box-zoom uses Shift+Drag, conflicting with **Shift+Click Pin B**.  
-✅ **Fix:** disable `map.boxZoom`.
-```ts
-map.boxZoom.disable();
-```
-
-### 2) Modifier key inconsistencies across click events 🧠
-**Problem:** Some click events lose `shiftKey` state depending on browser + canvas focus.  
-✅ **Fix:** cache shift state on `mousedown` and reuse on `click`.
-
-### 3) Performance: choropleth state over all polygons 🐢
-**Problem:** applying feature-state to all polygons at once is expensive.  
-✅ **Fix:** apply only to **visible polygons** via `queryRenderedFeatures` + cache per (metric|level|month).
-
-### 4) Stable legend buckets 🧮
-**Problem:** legend should represent full distribution, not viewport-only.  
-✅ **Fix:** compute quantiles from the full month dataset and keep legend in sync with month changes.
-
-### 5) Exporting map snapshot 🖼️
-**Problem:** Canvas export needs correct buffer settings and timing with Mapbox render cycle.  
-✅ **Fix:** use Mapbox canvas + correct map initialization configuration in `MapView` and export helper logic in `src/lib/export.ts`.
+- 3D project renderings (per-project models on their plots) with a project card on click (image, price, configurations, locality) and a slow orbit around the selected project.
+- Project count bubbles per locality and micromarket at lower zooms, dissolving into buildings when zoomed in.
+- Performance mode (lighter basemap, no landmarks) and mobile tuning.
+- Multi-city support: city switcher, per-city tilesets, dims and metrics.
+- Export polish: legend and title overlay on PNG, richer CSV.
 
 ---
 
-## 🧾 Version-wise implementations (milestones)
+## License
 
-### V1 — Basemap + layers
-- Mapbox map init
-- Vector sources + baseline fill/line/circle layers
-- Hover/click inspector
-
-### V2 — Interaction & UX upgrades
-- Inspect target switching
-- Layer visibility toggles
-- Reset view + 3D toggle (terrain)
-
-### V2.3 — Dynamic choropleth + compare
-- Metric/Level/Month controls
-- Quantile legend computed from month distribution
-- Visible-only feature-state caching
-- Pin A/B + deltas + sparklines
-- URL state encode/decode
-
-### V3.1 — Share + Export
-- Copy share URL
-- Export **PNG snapshot**
-- Export **CSV** for pinned time-series
-- Export helpers centralized in `src/lib/export.ts`
-
----
-
-## ✅ What “done” looks like for V3.1
-
-- Lint ✅
-- Build ✅
-- Dev runtime ✅
-- Exports working ✅
-- No console errors / crashes ✅
-
----
-
-## 🗺️ Roadmap (suggested next steps)
-
-### V3.2 — Export & reporting polish
-- Export PNG with **legend + title + timestamp overlay**
-- Export CSV including:
-  - metric label, level, month label
-  - A/B names + join keys
-  - deltas and pct change columns
-
-### V3.3 — Multi-city support
-- City switcher
-- Dynamic tileset selection per city
-- Per-city dim docs and metrics docs
-
-### V4 — “Analytics cockpit”
-- Side panel: top risers/fallers (month-over-month)
-- Outlier detection
-- Filters (BHK, asset type, price bands)
-- Save views (bookmarks)
-
----
-
-## 📜 License
-Internal / private (adjust as needed).
+MIT © 2026 Deepesh Gupta. See [LICENSE](LICENSE).
