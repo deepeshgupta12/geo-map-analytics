@@ -204,6 +204,23 @@ export function addDataLayers(map: Map, preset: LightPreset) {
   hoverSpec(LYR.mmHover, SRC.micromarkets, mmSL);
   hoverSpec(LYR.locHover, SRC.localities, locSL);
 
+  // Hover fill brighten (above the choropleth and the focus mask).
+  const hoverFillSpec = (id: string, source: string, sourceLayer: string) =>
+    map.addLayer({
+      id,
+      type: "fill",
+      source,
+      "source-layer": sourceLayer,
+      slot: SLOT.fills,
+      paint: {
+        "fill-color": c.hoverFill,
+        "fill-opacity": expr(["case", ["boolean", ["feature-state", "hover"], false], 1, 0]),
+        "fill-emissive-strength": 1,
+      },
+    });
+  hoverFillSpec(LYR.mmHoverFill, SRC.micromarkets, mmSL);
+  hoverFillSpec(LYR.locHoverFill, SRC.localities, locSL);
+
   // ---- Roads ----
   map.addLayer({
     id: LYR.roads,
@@ -366,6 +383,8 @@ export function applyPresetColors(map: Map, preset: LightPreset) {
   set(LYR.roads, "line-color", c.roads);
   set(LYR.mmHover, "line-color", c.hover);
   set(LYR.locHover, "line-color", c.hover);
+  set(LYR.mmHoverFill, "fill-color", c.hoverFill);
+  set(LYR.locHoverFill, "fill-color", c.hoverFill);
   set(LYR.mmMask, "fill-color", c.mask);
   set(LYR.projectsCircle, "circle-stroke-color", c.circleStroke);
   set(LYR.mmLabels, "text-color", c.labelText);

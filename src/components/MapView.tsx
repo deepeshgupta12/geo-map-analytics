@@ -30,9 +30,20 @@ import { computeQuantileStops, formatBucketRanges, collectDocValues } from "@/li
 import { addDataSources, addDataLayers, applyPresetColors, setVisibility, setFilterSafe, FILTERS } from "@/lib/mapLayers";
 import { ChoroplethEngine } from "@/lib/choropleth";
 import { FeatureIndex, bboxToBounds } from "@/lib/featureIndex";
+import { carryForward, type FilledDoc } from "@/lib/carryForward";
 import { toCsv, downloadText } from "@/lib/export";
 import type { DimDoc, DimItem, Level, MetricsDoc, PinnedSelection } from "@/lib/types";
-import { toNumericId } from "@/lib/types";
+import { toNumericId, normalizeName } from "@/lib/types";
+
+// URL state written by this version; view params from older URLs are ignored so a
+// stale `light=day` left in the address bar cannot override the night default.
+const URL_VERSION = "4";
+
+function findNormalized<T>(rows: Record<string, T>, key: string): T | undefined {
+  const want = normalizeName(key);
+  for (const k of Object.keys(rows)) if (normalizeName(k) === want) return rows[k];
+  return undefined;
+}
 
 // -----------------------------------------------------------------------------
 // Types
@@ -62,7 +73,6 @@ type RenderedFeature = {
 };
 
 const FIT_MM: FitBoundsOptions = { padding: 70, duration: 1100, maxZoom: Z_LOC + 0.7, essential: true };
-const FIT_LOC: FitBoundsOptions = { padding: 80, duration: 1100, maxZoom: Z_PROJ + 1.2, essential: true };
 
 // -----------------------------------------------------------------------------
 // Small helpers
@@ -209,6 +219,14 @@ export default function MapView() {
   const indexRef = useRef<FeatureIndex>(new FeatureIndex());
   const popupRef = useRef<mapboxgl.Popup | null>(null);
   const hoverStateRef = useRef<{ level: Level; id: number } | null>(null);
+  // Last cursor position over the canvas (null when the pointer left it).
+  const hoverPointRef = useRef<{ x: number; y: number } | null>(null);
+  // Focus to apply at the end of a click-driven camera move (beats the centre probe).
+  const focusHintRef = useRef<Focus | null>(null);
+  // Camera helper defined inside the map init (needs map + index); exposed for search.
+  const zoomToAreaRef = useRef<((level: Level, id: number, name: string) => boolean) | null>(null);
+  // Re-evaluates the hover card (e.g. after the month changes during playback).
+  const rehoverRef = useRef<(() => void) | null>(null);
 
   const [mapReady, setMapReady] = useState(false);
   const [hoverInfo, setHoverInfo] = useState<PickInfo | null>(null);
@@ -221,6 +239,8 @@ export default function MapView() {
   const [projectsInView, setProjectsInView] = useState(0);
   // Bumped whenever the style (re)loads so every map-touching effect re-applies itself.
   const [styleEpoch, setStyleEpoch] = useState(0);
+  // Bumped when the engine's join rules change and the choropleth must re-render.
+  const [renderNonce, setRenderNonce] = useState(0);
   const [restrictLoc, setRestrictLoc] = useState(true);
   const [restrictProj, setRestrictProj] = useState(true);
 
@@ -246,15 +266,19 @@ export default function MapView() {
   const [metricKey, setMetricKey] = useState<string>("asking_psf");
   const [levelMode, setLevelMode] = useState<LevelMode>("auto");
   const [scaleMode, setScaleMode] = useState<ScaleMode>("fixed");
+  // Locality metrics are sparse: paint a month without a value with the latest earlier value.
+  const [carryFwd, setCarryFwd] = useState(true);
   const [metricMonth, setMetricMonth] = useState<string>("");
 
   const docsRef = useRef<Record<string, Partial<Record<Level, MetricsDoc>>>>({});
+  const filledRef = useRef<Record<string, Partial<Record<Level, FilledDoc>>>>({});
   const [active, setActive] = useState<{ level: Level; doc: MetricsDoc } | null>(null);
 
-  const [legend, setLegend] = useState<{ stops: number[]; count: number; missing: number; min: number | null; max: number | null }>({
+  const [legend, setLegend] = useState<{ stops: number[]; count: number; missing: number; carried: number; min: number | null; max: number | null }>({
     stops: [],
     count: 0,
     missing: 0,
+    carried: 0,
     min: null,
     max: null,
   });
@@ -308,18 +332,30 @@ export default function MapView() {
     for (const d of dimMicromarkets) m.set(d.id, d);
     return m;
   }, [dimMicromarkets]);
-  const locIdsByMm = useMemo(() => {
-    const m = new Map<number, number[]>();
+  // Locality -> micromarket. Spatial (centroid inside the micromarket polygon) from the
+  // feature index once tiles are indexed, with the dimension table as fallback.
+  const locMmById = useMemo(() => {
+    const m = indexRef.current.localityMicromarkets();
     for (const d of dimLocalities) {
-      const mm = d.micromarketId ?? null;
-      if (mm === null) continue;
-      if (!m.has(mm)) m.set(mm, []);
-      m.get(mm)!.push(d.id);
+      if (!m.has(d.id) && d.micromarketId !== null && d.micromarketId !== undefined) m.set(d.id, d.micromarketId);
     }
     return m;
-  }, [dimLocalities]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dimLocalities, indexVersion]);
+  const locIdsByMm = useMemo(() => {
+    const m = new Map<number, number[]>();
+    for (const [id, mm] of locMmById) {
+      if (!m.has(mm)) m.set(mm, []);
+      m.get(mm)!.push(id);
+    }
+    return m;
+  }, [locMmById]);
 
-  const activeDoc = active && active.level === effectiveLevel ? active.doc : null;
+  const activeDoc: MetricsDoc | null = useMemo(() => {
+    if (!active || active.level !== effectiveLevel) return null;
+    if (carryFwd) return filledRef.current[metricKey]?.[effectiveLevel] ?? active.doc;
+    return active.doc;
+  }, [active, effectiveLevel, carryFwd, metricKey]);
   const monthOptions = useMemo(() => active?.doc.months ?? [], [active]);
   const def = useMemo(() => getMetricDef(metricKey), [metricKey]);
   const palette = useMemo(() => paletteFor(lightPreset, def.bucketCount), [lightPreset, def.bucketCount]);
@@ -343,6 +379,8 @@ export default function MapView() {
     lightPreset,
     metricKey,
     inspectAuto: inspectTarget === "auto",
+    locMmById,
+    carryFwd,
   });
   useEffect(() => {
     latest.current = {
@@ -362,6 +400,8 @@ export default function MapView() {
       lightPreset,
       metricKey,
       inspectAuto: inspectTarget === "auto",
+      locMmById,
+      carryFwd,
     };
   });
 
@@ -402,14 +442,19 @@ export default function MapView() {
     if (m && METRICS.some((x) => x.key === m)) setMetricKey(m);
     if (lvl === "auto" || lvl === "micromarkets" || lvl === "localities") setLevelMode(lvl);
     if (month) setMetricMonth(month);
-    if (lp === "dawn" || lp === "day" || lp === "dusk" || lp === "night") setLightPreset(lp);
-    if (th === "default" || th === "faded" || th === "monochrome") setTheme(th);
-    if (d3 === "1") setEnable3D(true);
-    if (d3 === "0") setEnable3D(false);
-    if (ch === "0") setEnableChoropleth(false);
-    if (heat === "1") setShowHeat(true);
-    if (scale === "fixed" || scale === "month") setScaleMode(scale);
-    if (ex === "1") setExtrude(true);
+
+    // View params only from URLs this version wrote (older ones carried day/2D defaults).
+    if (sp.get("v") === URL_VERSION) {
+      if (lp === "dawn" || lp === "day" || lp === "dusk" || lp === "night") setLightPreset(lp);
+      if (th === "default" || th === "faded" || th === "monochrome") setTheme(th);
+      if (d3 === "1") setEnable3D(true);
+      if (d3 === "0") setEnable3D(false);
+      if (ch === "0") setEnableChoropleth(false);
+      if (heat === "1") setShowHeat(true);
+      if (scale === "fixed" || scale === "month") setScaleMode(scale);
+      if (ex === "1") setExtrude(true);
+      if (sp.get("cf") === "0") setCarryFwd(false);
+    }
 
     const parsePin = (s: string | null): PinnedSelection | null => {
       if (!s) return null;
@@ -426,16 +471,23 @@ export default function MapView() {
 
   useEffect(() => {
     const sp = new URLSearchParams(window.location.search);
-    sp.set("metric", metricKey);
-    sp.set("level", levelMode);
+    // Only non-default values are written, so a fresh session keeps the defaults.
+    const put = (k: string, v: string, def: string) => {
+      if (v === def) sp.delete(k);
+      else sp.set(k, v);
+    };
+    sp.set("v", URL_VERSION);
+    put("metric", metricKey, "asking_psf");
+    put("level", levelMode, "auto");
     if (metricMonth) sp.set("month", metricMonth);
-    sp.set("light", lightPreset);
-    sp.set("theme", theme);
-    sp.set("d3", enable3D ? "1" : "0");
-    sp.set("ch", enableChoropleth ? "1" : "0");
-    sp.set("heat", showHeat ? "1" : "0");
-    sp.set("scale", scaleMode);
-    sp.set("ex", extrude ? "1" : "0");
+    put("light", lightPreset, "night");
+    put("theme", theme, "default");
+    put("d3", enable3D ? "1" : "0", "1");
+    put("ch", enableChoropleth ? "1" : "0", "1");
+    put("heat", showHeat ? "1" : "0", "0");
+    put("scale", scaleMode, "fixed");
+    put("ex", extrude ? "1" : "0", "0");
+    put("cf", carryFwd ? "1" : "0", "1");
     const encPin = (p: PinnedSelection | null) =>
       p ? `${p.level}:${encodeURIComponent(p.joinKey)}:${encodeURIComponent(p.displayName)}` : null;
     const a = encPin(pinA);
@@ -445,7 +497,7 @@ export default function MapView() {
     if (b) sp.set("pinB", b);
     else sp.delete("pinB");
     window.history.replaceState({}, "", `${window.location.pathname}?${sp.toString()}`);
-  }, [metricKey, levelMode, metricMonth, lightPreset, theme, enable3D, enableChoropleth, showHeat, scaleMode, extrude, pinA, pinB]);
+  }, [metricKey, levelMode, metricMonth, lightPreset, theme, enable3D, enableChoropleth, showHeat, scaleMode, extrude, carryFwd, pinA, pinB]);
 
   // ---------------------------------------------------------------------------
   // Dims (search + drill-down joins)
@@ -494,10 +546,12 @@ export default function MapView() {
       );
       if (cancelled) return;
       docsRef.current[metricKey] = docsRef.current[metricKey] || {};
+      filledRef.current[metricKey] = filledRef.current[metricKey] || {};
       let any = false;
       for (const r of results) {
         if (r.status === "fulfilled") {
           docsRef.current[metricKey]![r.value[0]] = r.value[1];
+          filledRef.current[metricKey]![r.value[0]] = carryForward(r.value[1]);
           any = true;
         } else console.error("Failed to load metrics JSON:", r.reason);
       }
@@ -627,16 +681,33 @@ export default function MapView() {
       map.on("zoom", onZoom);
 
       const updateFocus = () => {
+        // Mid-flight the zoom is meaningless (and tile loads trigger refreshes during
+        // it); moveend re-runs this once the camera has arrived.
+        if (map.isMoving()) return;
         const z = map.getZoom();
-        const centerPx = map.project(map.getCenter());
+        // A focus set by a click sticks through the camera flight and the refreshes
+        // after it, until the user moves the map themselves or leaves its zoom band.
+        let hint = focusHintRef.current;
+        if (hint && z < (hint.locId !== null ? Z_PROJ - Z_FADE : Z_LOC - Z_FADE)) {
+          focusHintRef.current = null;
+          hint = null;
+        }
+        // Probe where the user is looking: the cursor when it is over the map (wheel
+        // zoom anchors there), otherwise the screen centre.
+        const probePt = hoverPointRef.current;
+        const probe: mapboxgl.PointLike = probePt ? [probePt.x, probePt.y] : map.project(map.getCenter());
         setFocus((prev) => {
+          if (hint) {
+            const same = prev.mmId === hint.mmId && prev.locId === hint.locId && prev.mmName === hint.mmName && prev.locName === hint.locName;
+            return same ? prev : hint;
+          }
           let mmId = prev.mmId;
           let mmName = prev.mmName;
           let locId = prev.locId;
           let locName = prev.locName;
 
           if (z >= Z_LOC - Z_FADE) {
-            const f = map.queryRenderedFeatures(centerPx, { layers: [LYR.hitMm] })[0] as RenderedFeature | undefined;
+            const f = map.queryRenderedFeatures(probe, { layers: [LYR.hitMm] })[0] as RenderedFeature | undefined;
             const id = toNumericId(f?.id);
             if (f && id !== null) {
               mmId = id;
@@ -648,7 +719,7 @@ export default function MapView() {
           }
 
           if (z >= Z_PROJ - Z_FADE) {
-            const f = map.queryRenderedFeatures(centerPx, { layers: [LYR.hitLoc] })[0] as RenderedFeature | undefined;
+            const f = map.queryRenderedFeatures(probe, { layers: [LYR.hitLoc] })[0] as RenderedFeature | undefined;
             const id = toNumericId(f?.id);
             if (f && id !== null) {
               locId = id;
@@ -723,7 +794,9 @@ export default function MapView() {
             const d = locById.get(id);
             return d?.micromarketId ?? null;
           });
-          if (c1 || c2) {
+          // Spatial membership (centroid inside the micromarket polygon) beats the dimension table.
+          const c3 = idx.assignMicromarkets((id) => locById.get(id)?.micromarketId ?? null);
+          if (c1 || c2 || c3) {
             const src = map.getSource(SRC.labels) as mapboxgl.GeoJSONSource | undefined;
             src?.setData(idx.toLabelGeoJSON());
             setIndexVersion(idx.getVersion());
@@ -791,13 +864,7 @@ export default function MapView() {
       // Startup safety net in case neither idle nor a source event arrives promptly.
       const startupTimers = [800, 2500, 6000].map((ms) => window.setTimeout(scheduleRefresh, ms));
 
-      // ---- playback stops on interaction ----
-      const stop = () => stopPlayback();
-      map.on("dragstart", stop);
-      map.on("wheel", stop);
-      map.on("mousedown", stop);
-      map.on("touchstart", stop);
-
+      // Playback keeps running through pans and zooms; the level follows the zoom.
       const onMouseDown = (e: MapMouseEvent) => {
         shiftDownRef.current = isShiftPressed(e.originalEvent) || isShiftPressed(e);
       };
@@ -821,9 +888,9 @@ export default function MapView() {
       };
 
       const passesRestriction = (kind: InspectKind, props: Record<string, unknown>, id: number | null): boolean => {
-        const { focus, restrictLoc, restrictProj, locById } = latest.current;
+        const { focus, restrictLoc, restrictProj, locMmById } = latest.current;
         if (kind === "localities" && restrictLoc && focus.mmId !== null && id !== null) {
-          const mm = locById.get(id)?.micromarketId ?? null;
+          const mm = locMmById.get(id) ?? null;
           if (mm !== null && mm !== focus.mmId) return false;
         }
         if (kind === "projects" && restrictProj && focus.locId !== null) {
@@ -851,16 +918,20 @@ export default function MapView() {
         }
         if (kind === "micromarkets" || kind === "localities") {
           const name = kind === "micromarkets" ? getStrProp(props, "MicroMarketName") || `Micromarket ${id}` : getStrProp(props, "LocalityName") || `Locality ${id}`;
-          const joinKey = kind === "micromarkets" ? String(id) : name;
-          const doc = docsRef.current[latest.current.metricKey]?.[kind] ?? (activeDoc && latest.current.effectiveLevel === kind ? activeDoc : null);
-          const row = doc ? doc.byMonth?.[metricMonth]?.[joinKey] : undefined;
+          const canonical = kind === "localities" && id !== null ? (locById.get(id)?.name ?? name) : name;
+          const joinKey = kind === "micromarkets" ? String(id) : canonical;
+          const docs = latest.current.carryFwd ? filledRef.current : docsRef.current;
+          const doc = docs[latest.current.metricKey]?.[kind] ?? (activeDoc && latest.current.effectiveLevel === kind ? activeDoc : null);
+          const rows = doc?.byMonth?.[metricMonth] as Record<string, { v?: number | null; n?: number | null; asOf?: string }> | undefined;
+          const row = rows ? (rows[joinKey] ?? findNormalized(rows, joinKey)) : undefined;
           const v = typeof row?.v === "number" ? fmtMoney(row.v) : "no data";
           const n = typeof row?.n === "number" ? ` · n=${row.n}` : "";
+          const asOf = row?.asOf ? `<div class="gm-pop-muted">last available value, from ${escapeHtml(parseMonthLabel(row.asOf))}</div>` : "";
           return {
             name,
             html: `<div class="gm-pop-title">${escapeHtml(name)}</div><div>${escapeHtml(def.label)}: <b>${escapeHtml(v)}</b><span class="gm-pop-muted">${escapeHtml(
               n
-            )}</span></div><div class="gm-pop-muted">${escapeHtml(metricMonth ? parseMonthLabel(metricMonth) : "")}</div>`,
+            )}</span></div><div class="gm-pop-muted">${escapeHtml(metricMonth ? parseMonthLabel(metricMonth) : "")}</div>${asOf}`,
           };
         }
         if (kind === "roads") {
@@ -890,17 +961,21 @@ export default function MapView() {
       };
 
       let rafId: number | null = null;
-      let lastMove: MapMouseEvent | null = null;
+      const clearHover = () => {
+        map.getCanvas().style.cursor = "";
+        setHover(null, null);
+        popup.remove();
+        setHoverInfo(null);
+      };
+      // Re-evaluates what is under the last known cursor position. Also used after
+      // camera moves, since the map slides under a stationary cursor during wheel zoom.
       const handleMove = () => {
         rafId = null;
-        const e = lastMove;
-        if (!e) return;
-        const picked = pickAt(e.point);
+        const pt = hoverPointRef.current;
+        if (!pt) return;
+        const picked = pickAt([pt.x, pt.y]);
         if (!picked) {
-          map.getCanvas().style.cursor = "";
-          setHover(null, null);
-          popup.remove();
-          setHoverInfo(null);
+          clearHover();
           return;
         }
         const { kind, f } = picked;
@@ -909,25 +984,71 @@ export default function MapView() {
         map.getCanvas().style.cursor = "pointer";
         setHover(kind === "micromarkets" || kind === "localities" ? kind : null, id);
         const d = describe(kind, props, id);
-        popup.setLngLat(e.lngLat).setHTML(d.html).addTo(map);
-        setHoverInfo({ kind, name: d.name, featureId: id, properties: props, lngLat: { lng: e.lngLat.lng, lat: e.lngLat.lat } });
+        const lngLat = map.unproject([pt.x, pt.y]);
+        popup.setLngLat(lngLat).setHTML(d.html).addTo(map);
+        setHoverInfo({ kind, name: d.name, featureId: id, properties: props, lngLat: { lng: lngLat.lng, lat: lngLat.lat } });
       };
-      const onMove = (e: MapMouseEvent) => {
-        lastMove = e;
+      const scheduleHover = () => {
         if (rafId === null) rafId = window.requestAnimationFrame(handleMove);
       };
+      rehoverRef.current = scheduleHover;
+      const onMove = (e: MapMouseEvent) => {
+        hoverPointRef.current = { x: e.point.x, y: e.point.y };
+        scheduleHover();
+      };
       const onLeave = () => {
+        hoverPointRef.current = null;
+        clearHover();
+      };
+      // Hover must not survive a camera move on a feature that is no longer under the cursor.
+      const onMoveStartHover = (e: { originalEvent?: unknown }) => {
         setHover(null, null);
         popup.remove();
-        setHoverInfo(null);
-        map.getCanvas().style.cursor = "";
+        // A user-driven move (wheel, drag, control button) releases a click-set focus.
+        if (e.originalEvent) focusHintRef.current = null;
+      };
+      const onMoveEndHover = () => {
+        if (hoverPointRef.current) scheduleHover();
       };
       map.on("mousemove", onMove);
       map.on("mouseout", onLeave);
+      map.on("movestart", onMoveStartHover);
+      map.on("moveend", onMoveEndHover);
+
+      // Zoom into a polygon so the next drill-down level is actually reached: a
+      // micromarket lands in the localities band, a locality in the projects band.
+      // Centre on the polygon's centroid (inside the shape, unlike a bbox centre) and
+      // set the focus from the click itself rather than from whatever ends up under
+      // the screen centre.
+      const zoomToArea = (level: Level, id: number, name: string, fallbackBounds: [[number, number], [number, number]] | null): boolean => {
+        const entry = indexRef.current.get(level, id);
+        const bounds = entry ? bboxToBounds(entry.bbox) : fallbackBounds;
+        if (!bounds) return false;
+        const minZoom = level === "micromarkets" ? Z_LOC + 0.3 : Z_PROJ + 0.2;
+        const maxZoom = level === "micromarkets" ? Z_LOC + 0.9 : Z_PROJ + 1.3;
+        const cam = map.cameraForBounds(bounds, { padding: 70, maxZoom, bearing: map.getBearing(), pitch: map.getPitch() }) as
+          | { zoom?: number; center?: LngLatLike }
+          | undefined;
+        const zoom = Math.max(cam?.zoom ?? minZoom, minZoom);
+        const center: LngLatLike = entry ? [entry.cx, entry.cy] : (cam?.center ?? map.getCenter());
+        const { focus, locMmById, mmById } = latest.current;
+        if (level === "micromarkets") {
+          focusHintRef.current = { mmId: id, mmName: name, locId: null, locName: "" };
+        } else {
+          const mmId = locMmById.get(id) ?? focus.mmId;
+          const mmName = mmId !== null ? (mmById.get(mmId)?.name ?? focus.mmName) : focus.mmName;
+          focusHintRef.current = { mmId, mmName, locId: id, locName: name };
+        }
+        hoverPointRef.current = null;
+        setHover(null, null);
+        popup.remove();
+        map.flyTo({ center, zoom, pitch: map.getPitch(), bearing: map.getBearing(), duration: 1100, essential: true });
+        return true;
+      };
+      zoomToAreaRef.current = (level, id, name) => zoomToArea(level, id, name, null);
 
       // ---- click: pin + drill ----
       const onClick = (e: MapMouseEvent) => {
-        stopPlayback();
         const picked = pickAt(e.point);
         if (!picked) {
           setClickInfo(null);
@@ -952,9 +1073,7 @@ export default function MapView() {
           if (assignToB) setPinB(next);
           else setPinA(next);
 
-          const entry = indexRef.current.get(kind, id);
-          const bounds = entry ? bboxToBounds(entry.bbox) : boundsFromGeometry(f.geometry);
-          if (bounds) map.fitBounds(bounds, kind === "micromarkets" ? FIT_MM : FIT_LOC);
+          zoomToArea(kind, id, d.name, boundsFromGeometry(f.geometry));
         }
       };
       map.on("click", onClick);
@@ -970,13 +1089,11 @@ export default function MapView() {
         map.off("sourcedata", onSourceData);
         if (refreshTimer !== null) window.clearTimeout(refreshTimer);
         for (const t of startupTimers) window.clearTimeout(t);
-        map.off("dragstart", stop);
-        map.off("wheel", stop);
-        map.off("mousedown", stop);
-        map.off("touchstart", stop);
         map.off("mousedown", onMouseDown);
         map.off("mousemove", onMove);
         map.off("mouseout", onLeave);
+        map.off("movestart", onMoveStartHover);
+        map.off("moveend", onMoveEndHover);
         map.off("click", onClick);
         if (rafId !== null) window.cancelAnimationFrame(rafId);
       });
@@ -1184,17 +1301,19 @@ export default function MapView() {
   // ---------------------------------------------------------------------------
   useEffect(() => {
     if (!enableChoropleth || !activeDoc || !metricMonth) {
-      setLegend({ stops: [], count: 0, missing: 0, min: null, max: null });
+      setLegend({ stops: [], count: 0, missing: 0, carried: 0, min: null, max: null });
       return;
     }
     const months = scaleMode === "fixed" ? activeDoc.months ?? [] : [metricMonth];
     const { values } = collectDocValues(activeDoc.byMonth, months);
     const cur = collectDocValues(activeDoc.byMonth, [metricMonth]);
     values.sort((a, b) => a - b);
+    const carried = "carried" in activeDoc ? ((activeDoc as FilledDoc).carried?.[metricMonth] ?? 0) : 0;
     setLegend({
       stops: computeQuantileStops(values, def.bucketCount),
       count: cur.values.length,
       missing: cur.missing,
+      carried,
       min: values.length ? values[0]! : null,
       max: values.length ? values[values.length - 1]! : null,
     });
@@ -1208,6 +1327,15 @@ export default function MapView() {
     eng.setPaint({ stops: legend.stops, palette, missing: missingColorFor(lightPreset) }, null);
   }, [legend.stops, palette, lightPreset, mapReady, styleEpoch]);
 
+  // Join localities by their canonical dimension name: tile names sometimes differ
+  // from the metric keys (extra spaces, punctuation), which left polygons grey.
+  useEffect(() => {
+    const eng = engineRef.current;
+    if (!eng || !mapReady || !locById.size) return;
+    eng.setJoinKeyResolver("localities", (id, tileName) => locById.get(id)?.name ?? tileName);
+    setRenderNonce((n) => n + 1);
+  }, [locById, mapReady, styleEpoch]);
+
   // Render (values -> feature-state, cross-fade on month change)
   useEffect(() => {
     const eng = engineRef.current;
@@ -1219,7 +1347,8 @@ export default function MapView() {
     if (!activeDoc || !metricMonth) return; // keep current fills while this level's data loads
     const durationMs = isPlayingRef.current ? Math.round(playStepMs * 0.8) : 350;
     eng.render({ level: effectiveLevel, doc: activeDoc, month: metricMonth, durationMs });
-  }, [enableChoropleth, activeDoc, metricMonth, effectiveLevel, mapReady, playStepMs, styleEpoch]);
+    rehoverRef.current?.(); // keep an open hover card on the current month
+  }, [enableChoropleth, activeDoc, metricMonth, effectiveLevel, mapReady, playStepMs, styleEpoch, renderNonce]);
 
   // 3D bars
   useEffect(() => {
@@ -1289,8 +1418,7 @@ export default function MapView() {
     const tryFit = (): boolean => {
       const entry = indexRef.current.get(level, item.id) ?? indexRef.current.findByName(level, item.name);
       if (!entry) return false;
-      map.fitBounds(bboxToBounds(entry.bbox), level === "micromarkets" ? FIT_MM : FIT_LOC);
-      return true;
+      return zoomToAreaRef.current?.(level, entry.id, entry.name || item.name) ?? false;
     };
     if (tryFit()) return;
 
@@ -1604,6 +1732,17 @@ export default function MapView() {
               </div>
             </div>
 
+            <Check
+              label="Carry forward the last available month (locality data is sparse)"
+              checked={carryFwd}
+              onChange={(v) => {
+                stopPlayback();
+                setCarryFwd(v);
+              }}
+              disabled={!enableChoropleth}
+              hint="A locality without a value this month is painted with its latest earlier value; the hover card says which month it came from"
+            />
+
             <div style={{ padding: 10, border: `1px solid ${UI.panelBorder}`, borderRadius: 8, background: "rgba(255,255,255,0.03)" }}>
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
                 <div style={{ fontSize: 12, opacity: 0.9 }}>Timeline</div>
@@ -1638,12 +1777,12 @@ export default function MapView() {
                 </label>
               </div>
               <div style={{ marginTop: 8, fontSize: 11, color: UI.mutedText }}>
-                Months cross-fade on the GPU. Playback pauses when you drag or zoom.
+                Months cross-fade on the GPU. Playback keeps running while you zoom; the level follows the zoom.
               </div>
             </div>
 
             <div style={{ fontSize: 12, color: UI.mutedText }}>
-              Range {legend.min === null ? "-" : fmtMoney(legend.min)} – {legend.max === null ? "-" : fmtMoney(legend.max)} · {legend.count} areas with data, {legend.missing} without ({scaleMode === "fixed" ? "scale over all months" : "scale for this month"})
+              Range {legend.min === null ? "-" : fmtMoney(legend.min)} – {legend.max === null ? "-" : fmtMoney(legend.max)} · {legend.count} areas with data{legend.carried ? ` (${legend.carried} carried forward from earlier months)` : ""}, {legend.missing} without ({scaleMode === "fixed" ? "scale over all months" : "scale for this month"})
             </div>
           </div>
         </Section>

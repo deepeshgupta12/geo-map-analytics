@@ -58,6 +58,17 @@ function polygonStats(polygon: Ring[]): { a: number; sx: number; sy: number } {
   return { a, sx, sy };
 }
 
+function pointInRing(x: number, y: number, ring: Ring): boolean {
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const [xi, yi] = ring[i]!;
+    const [xj, yj] = ring[j]!;
+    const intersects = yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi;
+    if (intersects) inside = !inside;
+  }
+  return inside;
+}
+
 function extendBBox(b: BBox, ring: Ring) {
   for (const [x, y] of ring) {
     if (x < b[0]) b[0] = x;
@@ -72,6 +83,49 @@ const emptyBBox = (): BBox => [Infinity, Infinity, -Infinity, -Infinity];
 export class FeatureIndex {
   private entries = new Map<string, IndexEntry>();
   private version = 0;
+  // Outer rings of every micromarket piece seen (tile-clipped), for point-in-polygon.
+  private mmRings = new Map<number, Ring[]>();
+
+  /** Micromarket whose polygon contains the point, if its geometry has been indexed. */
+  mmIdForPoint(lng: number, lat: number): number | null {
+    for (const [id, rings] of this.mmRings) {
+      for (const ring of rings) if (pointInRing(lng, lat, ring)) return id;
+    }
+    return null;
+  }
+
+  hasMicromarketGeometry(): boolean {
+    return this.mmRings.size > 0;
+  }
+
+  /**
+   * Decide which micromarket each locality belongs to: spatially (its centroid inside
+   * the micromarket polygon) when geometry is known, otherwise via `fallback`.
+   * Returns true if any assignment changed.
+   */
+  assignMicromarkets(fallback: (id: number) => number | null): boolean {
+    let changed = false;
+    for (const e of this.entries.values()) {
+      if (e.level !== "localities") continue;
+      const spatial = this.mmRings.size ? this.mmIdForPoint(e.cx, e.cy) : null;
+      const mmId = spatial ?? fallback(e.id) ?? e.mmId;
+      if (mmId !== e.mmId) {
+        e.mmId = mmId;
+        changed = true;
+      }
+    }
+    if (changed) this.version++;
+    return changed;
+  }
+
+  /** locality id -> micromarket id for every indexed locality with a known micromarket. */
+  localityMicromarkets(): Map<number, number> {
+    const m = new Map<number, number>();
+    for (const e of this.entries.values()) {
+      if (e.level === "localities" && e.mmId !== null) m.set(e.id, e.mmId);
+    }
+    return m;
+  }
 
   static key(level: Level, id: number) {
     return `${level}:${id}`;
@@ -119,7 +173,7 @@ export class FeatureIndex {
     if (!feats.length) return false;
 
     // Accumulate per feature id for this scan only.
-    const acc = new Map<number, { name: string; a: number; sx: number; sy: number; bbox: BBox }>();
+    const acc = new Map<number, { name: string; a: number; sx: number; sy: number; bbox: BBox; rings: Ring[] }>();
 
     for (const f of feats) {
       const id = toNumericId(f.id);
@@ -135,7 +189,7 @@ export class FeatureIndex {
 
       let cur = acc.get(id);
       if (!cur) {
-        cur = { name, a: 0, sx: 0, sy: 0, bbox: emptyBBox() };
+        cur = { name, a: 0, sx: 0, sy: 0, bbox: emptyBBox(), rings: [] };
         acc.set(id, cur);
       }
       for (const poly of polys) {
@@ -144,6 +198,7 @@ export class FeatureIndex {
         cur.sx += s.sx;
         cur.sy += s.sy;
         for (const ring of poly) extendBBox(cur.bbox, ring);
+        if (level === "micromarkets" && poly[0]) cur.rings.push(poly[0]);
       }
     }
 
@@ -172,6 +227,7 @@ export class FeatureIndex {
         cx: s.sx / s.a,
         cy: s.sy / s.a,
       });
+      if (level === "micromarkets") this.mmRings.set(id, s.rings);
       changed = true;
     }
     if (changed) this.version++;

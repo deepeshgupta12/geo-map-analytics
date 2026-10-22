@@ -7,7 +7,7 @@ import type { Map as MapboxMap, ExpressionSpecification } from "mapbox-gl";
 import { TILESETS } from "@/config/tilesets";
 import { LYR, SRC, CHOROPLETH_OPACITY } from "@/config/layers";
 import type { Level, MetricsDoc } from "@/lib/types";
-import { toNumericId } from "@/lib/types";
+import { toNumericId, normalizeName } from "@/lib/types";
 
 type Slot = "a" | "b";
 type Expr = ExpressionSpecification;
@@ -39,6 +39,26 @@ function strictlyIncreasing(stops: number[]): number[] {
   return out;
 }
 
+type Bucket = { v?: number | null; n?: number | null; asOf?: string | null };
+type JoinKeyResolver = (id: number, tileName: string) => string;
+
+/** Exact key first, then a normalised-name match (extra spaces, case, punctuation). */
+function makeLookup(byMonth: Record<string, Bucket>): (key: string) => Bucket | undefined {
+  let norm: Map<string, Bucket> | null = null;
+  return (key: string) => {
+    const direct = byMonth[key];
+    if (direct) return direct;
+    if (!norm) {
+      norm = new Map();
+      for (const k of Object.keys(byMonth)) {
+        const n = normalizeName(k);
+        if (!norm.has(n)) norm.set(n, byMonth[k]!);
+      }
+    }
+    return norm.get(normalizeName(key));
+  };
+}
+
 function valueExpr(stateKey: string): unknown {
   return ["coalesce", ["feature-state", stateKey], -1];
 }
@@ -61,8 +81,20 @@ export class ChoroplethEngine {
   private stated: Record<Level, Set<number>> = { micromarkets: new Set(), localities: new Set() };
   private opacity = CHOROPLETH_OPACITY;
   private extrudeLevel: Level | null = null;
+  private resolvers: Partial<Record<Level, JoinKeyResolver>> = {};
 
   constructor(private map: MapboxMap) {}
+
+  /**
+   * Override how a feature id maps to a metrics key (e.g. canonical dimension name
+   * instead of the tile's own name). Forces re-discovery and a hard re-render.
+   */
+  setJoinKeyResolver(level: Level, fn: JoinKeyResolver | null) {
+    this.resolvers[level] = fn ?? undefined;
+    this.joinKeyById[level].clear();
+    this.stated[level].clear();
+    this.lastMonth = null;
+  }
 
   // ---------------------------------------------------------------
   // Discovery of feature ids (and join keys) from loaded tiles
@@ -98,7 +130,9 @@ export class ChoroplethEngine {
       const id = toNumericId(f.id);
       if (id === null || known.has(id)) continue;
       const props = (f.properties ?? {}) as Record<string, unknown>;
-      const joinKey = level === "micromarkets" ? String(id) : typeof props.LocalityName === "string" ? props.LocalityName : "";
+      const tileName = typeof props.LocalityName === "string" ? props.LocalityName : "";
+      const resolver = this.resolvers[level];
+      const joinKey = level === "micromarkets" ? String(id) : resolver ? resolver(id, tileName) : tileName;
       if (!joinKey) continue;
       known.set(id, joinKey);
       added++;
@@ -106,16 +140,18 @@ export class ChoroplethEngine {
     return added;
   }
 
-  private writeState(level: Level, ids: Iterable<number>, byMonth: Record<string, { v?: number | null; n?: number | null }>, slots: Slot[]) {
+  private writeState(level: Level, ids: Iterable<number>, byMonth: Record<string, Bucket>, slots: Slot[]) {
     const map = this.map;
     const { source, sourceLayer } = SOURCE[level];
     const keys = this.joinKeyById[level];
+    const lookup = makeLookup(byMonth);
     for (const id of ids) {
       const joinKey = keys.get(id) ?? "";
-      const bucket = joinKey ? byMonth[joinKey] : undefined;
+      const bucket = joinKey ? lookup(joinKey) : undefined;
       const v = typeof bucket?.v === "number" && Number.isFinite(bucket.v) ? bucket.v : null;
       const n = typeof bucket?.n === "number" ? bucket.n : null;
-      const state: Record<string, unknown> = { v, n };
+      // asOf: month the value was carried forward from (null when it is this month's own).
+      const state: Record<string, unknown> = { v, n, asOf: bucket?.asOf ?? null };
       for (const s of slots) state[s] = v;
       map.setFeatureState({ source, sourceLayer, id }, state);
     }

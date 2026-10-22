@@ -58,6 +58,8 @@ export const LYR = {
 
   mmHover: "mm-hover",
   locHover: "loc-hover",
+  mmHoverFill: "mm-hover-fill",
+  locHoverFill: "loc-hover-fill",
 
   // Optional 3D bars (fill-extrusion by metric value).
   mmExtrude: "mm-extrude",
@@ -181,7 +183,9 @@ export function outlineColorsFor(preset: LightPreset) {
     mm: dark ? "rgba(255,255,255,0.9)" : "rgba(15,23,42,0.85)",
     loc: dark ? "rgba(255,255,255,0.6)" : "rgba(15,23,42,0.55)",
     roads: dark ? "rgba(251,191,36,0.55)" : "rgba(180,83,9,0.6)",
-    hover: dark ? "#ffffff" : "#111827",
+    // Distinct from the white/dark outlines so a hovered polygon reads as highlighted.
+    hover: dark ? "#22d3ee" : "#0369a1",
+    hoverFill: dark ? "rgba(34,211,238,0.28)" : "rgba(3,105,161,0.22)",
     mask: dark ? "rgba(2,6,23,0.55)" : "rgba(255,255,255,0.55)",
     labelText: dark ? "#f8fafc" : "#0f172a",
     labelHalo: dark ? "rgba(2,6,23,0.9)" : "rgba(255,255,255,0.9)",

@@ -28,6 +28,15 @@ export function toFeatureId(v: unknown): FeatureId | null {
   return typeof v === "string" || typeof v === "number" ? v : null;
 }
 
+/** Loose key for name joins: case-insensitive, whitespace collapsed, punctuation dropped. */
+export function normalizeName(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 export function toNumericId(v: unknown): number | null {
   if (typeof v === "number" && Number.isFinite(v)) return v;
   if (typeof v === "string" && v.trim() !== "" && Number.isFinite(Number(v))) return Number(v);
