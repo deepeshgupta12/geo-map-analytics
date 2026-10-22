@@ -30,6 +30,29 @@ export function computeQuantileStops(values: number[], bucketCount: number): num
   return stops;
 }
 
+/**
+ * Collect finite metric values from a metrics document, either for a single
+ * month or across every month (used for a scale that stays fixed during playback).
+ */
+export function collectDocValues(
+  byMonth: Record<string, Record<string, { v?: number | null }>> | undefined,
+  months: string[]
+): { values: number[]; missing: number } {
+  const values: number[] = [];
+  let missing = 0;
+  if (!byMonth) return { values, missing };
+  for (const m of months) {
+    const rows = byMonth[m];
+    if (!rows) continue;
+    for (const k of Object.keys(rows)) {
+      const v = rows[k]?.v;
+      if (typeof v === "number" && Number.isFinite(v)) values.push(v);
+      else missing += 1;
+    }
+  }
+  return { values, missing };
+}
+
 export function formatBucketRanges(stops: number[]): Array<[number, number]> {
   if (stops.length < 2) return [];
   const ranges: Array<[number, number]> = [];
