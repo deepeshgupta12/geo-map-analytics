@@ -1,107 +1,72 @@
 "use client";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import mapboxgl, { AnyLayer, Map, MapMouseEvent, MapboxGeoJSONFeature } from "mapbox-gl";
-import type { ExpressionSpecification, FitBoundsOptions, LngLatLike, FilterSpecification } from "mapbox-gl";
+import mapboxgl, { MapMouseEvent } from "mapbox-gl";
+import type { Map as MapboxMap, FitBoundsOptions, LngLatLike } from "mapbox-gl";
 import { TILESETS } from "@/config/tilesets";
-import { METRICS, getMetricDef, ChoroplethLevel as ChoroplethLevelCfg } from "@/config/metrics";
-import { computeQuantileStops, formatBucketRanges } from "@/lib/quantiles";
+import { METRICS, getMetricDef } from "@/config/metrics";
+import {
+  CITY_BOUNDS,
+  CHOROPLETH_OPACITY,
+  DEFAULT_BEARING_3D,
+  DEFAULT_CENTER,
+  DEFAULT_PITCH_3D,
+  DEFAULT_ZOOM,
+  LYR,
+  SRC,
+  STATUS_GROUPS,
+  UI,
+  Z_LOC,
+  Z_PROJ,
+  Z_FADE,
+  type BasemapTheme,
+  type LightPreset,
+  type ZoomBand,
+  missingColorFor,
+  paletteFor,
+  zoomBand,
+} from "@/config/layers";
+import { computeQuantileStops, formatBucketRanges, collectDocValues } from "@/lib/quantiles";
+import { addDataSources, addDataLayers, applyPresetColors, setVisibility, setFilterSafe, FILTERS } from "@/lib/mapLayers";
+import { ChoroplethEngine } from "@/lib/choropleth";
+import { FeatureIndex, bboxToBounds } from "@/lib/featureIndex";
+import { toCsv, downloadText } from "@/lib/export";
+import type { DimDoc, DimItem, Level, MetricsDoc, PinnedSelection } from "@/lib/types";
+import { toNumericId } from "@/lib/types";
+
+// -----------------------------------------------------------------------------
+// Types
+// -----------------------------------------------------------------------------
+type InspectKind = "micromarkets" | "localities" | "projects" | "roads" | "city";
+type InspectTarget = "auto" | InspectKind;
+type LevelMode = "auto" | Level;
+type ScaleMode = "fixed" | "month";
+type PlaySpeed = "slow" | "normal" | "fast";
 
 type PickInfo = {
-  layerId: string;
-  sourceLayer: string;
-  featureId: unknown;
-  propertyKeys: string[];
+  kind: InspectKind;
+  name: string;
+  featureId: number | null;
   properties: Record<string, unknown>;
   lngLat: { lng: number; lat: number };
 };
 
-type InspectTarget = "localities" | "micromarkets" | "projects" | "roads" | "city";
-type LightPreset = "dawn" | "day" | "dusk" | "night";
+type Focus = { mmId: number | null; mmName: string; locId: number | null; locName: string };
+const NO_FOCUS: Focus = { mmId: null, mmName: "", locId: null, locName: "" };
 
-type MetricBucket = { v: number; n?: number };
-type MetricsDoc = {
-  cityId: number;
-  metric: string;
-  level: string;
-  months: string[];
-  byMonth: Record<string, Record<string, MetricBucket>>;
-  notes?: string[];
+type RenderedFeature = {
+  id?: unknown;
+  properties?: Record<string, unknown> | null;
+  geometry?: unknown;
+  layer?: { id?: string };
 };
 
-type PinnedSelection = {
-  level: ChoroplethLevel;
-  joinKey: string; // for micromarkets = featureId string; for localities = LocalityName
-  displayName: string;
-  featureId: string | number | null;
-};
+const FIT_MM: FitBoundsOptions = { padding: 70, duration: 1100, maxZoom: Z_LOC + 0.7, essential: true };
+const FIT_LOC: FitBoundsOptions = { padding: 80, duration: 1100, maxZoom: Z_PROJ + 1.2, essential: true };
 
-type ChoroplethLevel = "micromarkets" | "localities";
-
-const DEFAULT_CENTER: [number, number] = [72.8777, 19.076]; // Mumbai
-const DEFAULT_ZOOM = 10.5;
-
-const FIT_BOUNDS_OPTS: FitBoundsOptions = {
-  padding: 48,
-  duration: 650,
-  maxZoom: 13.75,
-};
-
-// UI tokens (exported for reuse/testing)
-export const UI = {
-  panelBg: "#0B0F19",
-  panelText: "#E5E7EB",
-  panelBorder: "rgba(255,255,255,0.12)",
-
-  controlBg: "#FFFFFF",
-  controlText: "#111827",
-  controlBorder: "#E5E7EB",
-
-  mutedText: "rgba(229,231,235,0.72)",
-
-  primaryBg: "#2563EB",
-  primaryText: "#FFFFFF",
-
-  // pin A / pin B
-  pinA: "#F59E0B",
-  pinB: "#A855F7",
-
-  // choropleth palette (5 buckets)
-  palette: ["#E0F2FE", "#93C5FD", "#60A5FA", "#3B82F6", "#1D4ED8"],
-  missing: "#9CA3AF",
-};
-
-// Invisible “hit” layers
-const HIT_LAYERS = {
-  city: "city-hit",
-  micromarkets: "micromarkets-hit",
-  localities: "localities-hit",
-  roads: "roads-hit",
-  projects: "projects-hit",
-} as const;
-
-// Pinned outline layers
-const PIN_LAYERS = {
-  mmA: "pinned-mm-outline-a",
-  mmB: "pinned-mm-outline-b",
-  locA: "pinned-loc-outline-a",
-  locB: "pinned-loc-outline-b",
-} as const;
-
-// ---- Typed helpers ----
-type LayerWithSourceLayer = AnyLayer & { "source-layer"?: string };
-type FeatureId = string | number;
-
-function getLayerId(f: MapboxGeoJSONFeature): string {
-  return f.layer?.id ?? "";
-}
-function getSourceLayer(f: MapboxGeoJSONFeature): string {
-  const layer = f.layer as LayerWithSourceLayer | undefined;
-  return layer?.["source-layer"] ?? "";
-}
-function toFeatureId(v: unknown): FeatureId | null {
-  return typeof v === "string" || typeof v === "number" ? v : null;
-}
+// -----------------------------------------------------------------------------
+// Small helpers
+// -----------------------------------------------------------------------------
 function safeJson(v: unknown) {
   try {
     return JSON.stringify(v, null, 2);
@@ -122,61 +87,39 @@ function getStrProp(props: Record<string, unknown> | null | undefined, key: stri
   const v = props?.[key];
   return typeof v === "string" ? v : "";
 }
-
-// Robust Shift detection across MouseEvent/PointerEvent/KeyboardEvent + getModifierState
 function isShiftPressed(evt: unknown): boolean {
   if (!evt || typeof evt !== "object") return false;
-
-  const maybeShift = evt as { shiftKey?: unknown; getModifierState?: unknown };
-
-  if (typeof maybeShift.shiftKey === "boolean") return maybeShift.shiftKey;
-
-  if (typeof maybeShift.getModifierState === "function") {
-    return Boolean((maybeShift.getModifierState as (key: string) => boolean)("Shift"));
-  }
-
+  const e = evt as { shiftKey?: unknown; getModifierState?: unknown };
+  if (typeof e.shiftKey === "boolean") return e.shiftKey;
+  if (typeof e.getModifierState === "function") return Boolean((e.getModifierState as (k: string) => boolean)("Shift"));
   return false;
 }
-
-// Geometry -> bounds
-function isNumber(v: unknown): v is number {
-  return typeof v === "number" && Number.isFinite(v);
-}
-function isLngLatPair(v: unknown): v is [number, number] {
-  return Array.isArray(v) && v.length === 2 && isNumber(v[0]) && isNumber(v[1]);
-}
-function collectLngLatPairs(node: unknown, out: Array<[number, number]>) {
-  if (isLngLatPair(node)) {
-    out.push(node);
-    return;
-  }
-  if (Array.isArray(node)) {
-    for (const child of node) collectLngLatPairs(child, out);
-  }
+function isEditableTarget(t: EventTarget | null): boolean {
+  if (!t || !(t instanceof HTMLElement)) return false;
+  const tag = t.tagName;
+  return tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA" || t.isContentEditable;
 }
 function boundsFromGeometry(geometry: unknown): [[number, number], [number, number]] | null {
-  if (!geometry || typeof geometry !== "object") return null;
-  const g = geometry as { type?: unknown; coordinates?: unknown };
-  if (typeof g.type !== "string") return null;
-
   const pts: Array<[number, number]> = [];
-  collectLngLatPairs(g.coordinates, pts);
-  if (pts.length === 0) return null;
-
-  let minLng = Number.POSITIVE_INFINITY;
-  let minLat = Number.POSITIVE_INFINITY;
-  let maxLng = Number.NEGATIVE_INFINITY;
-  let maxLat = Number.NEGATIVE_INFINITY;
-
-  for (const [lng, lat] of pts) {
-    minLng = Math.min(minLng, lng);
-    minLat = Math.min(minLat, lat);
-    maxLng = Math.max(maxLng, lng);
-    maxLat = Math.max(maxLat, lat);
-  }
-
-  if (!Number.isFinite(minLng) || !Number.isFinite(minLat) || !Number.isFinite(maxLng) || !Number.isFinite(maxLat)) {
-    return null;
+  const walk = (node: unknown) => {
+    if (Array.isArray(node) && node.length === 2 && typeof node[0] === "number" && typeof node[1] === "number") {
+      pts.push(node as [number, number]);
+      return;
+    }
+    if (Array.isArray(node)) for (const c of node) walk(c);
+  };
+  const g = geometry as { coordinates?: unknown } | undefined;
+  walk(g?.coordinates);
+  if (!pts.length) return null;
+  let minLng = Infinity,
+    minLat = Infinity,
+    maxLng = -Infinity,
+    maxLat = -Infinity;
+  for (const [x, y] of pts) {
+    minLng = Math.min(minLng, x);
+    minLat = Math.min(minLat, y);
+    maxLng = Math.max(maxLng, x);
+    maxLat = Math.max(maxLat, y);
   }
   if (minLng === maxLng) {
     minLng -= 0.001;
@@ -186,376 +129,397 @@ function boundsFromGeometry(geometry: unknown): [[number, number], [number, numb
     minLat -= 0.001;
     maxLat += 0.001;
   }
-
   return [
     [minLng, minLat],
     [maxLng, maxLat],
   ];
 }
-function fitToFeature(map: Map, feature: MapboxGeoJSONFeature) {
-  const b = boundsFromGeometry((feature as unknown as { geometry?: unknown }).geometry);
-  if (b) {
-    map.fitBounds(b, FIT_BOUNDS_OPTS);
-    return;
-  }
-}
-
-// Deltas + sparklines
 function formatDelta(vNow: number | null, vPrev: number | null) {
   if (vNow === null || vPrev === null) return { abs: "-", pct: "-" };
   const abs = vNow - vPrev;
   const pct = vPrev !== 0 ? (abs / vPrev) * 100 : null;
-  const absStr = (abs >= 0 ? "+" : "") + fmtMoney(Math.round(abs));
-  const pctStr = pct === null ? "-" : `${abs >= 0 ? "+" : ""}${pct.toFixed(1)}%`;
-  return { abs: absStr, pct: pctStr };
+  return {
+    abs: (abs >= 0 ? "+" : "") + fmtMoney(Math.round(abs)),
+    pct: pct === null ? "-" : `${abs >= 0 ? "+" : ""}${pct.toFixed(1)}%`,
+  };
 }
 function buildSparklinePath(values: number[], w: number, h: number) {
   if (values.length < 2) return "";
   const min = Math.min(...values);
   const max = Math.max(...values);
-
   const pad = 2;
   const innerW = Math.max(1, w - pad * 2);
   const innerH = Math.max(1, h - pad * 2);
-
   const denom = max - min;
-  const normY = (v: number) => {
-    if (denom === 0) return pad + innerH / 2;
-    const t = (v - min) / denom;
-    return pad + (1 - t) * innerH;
-  };
-
+  const normY = (v: number) => (denom === 0 ? pad + innerH / 2 : pad + (1 - (v - min) / denom) * innerH);
   const step = innerW / (values.length - 1);
-  let d = `M ${pad} ${normY(values[0]).toFixed(2)}`;
-  for (let i = 1; i < values.length; i++) {
-    const x = pad + step * i;
-    const y = normY(values[i]);
-    d += ` L ${x.toFixed(2)} ${y.toFixed(2)}`;
-  }
+  let d = `M ${pad} ${normY(values[0]!).toFixed(2)}`;
+  for (let i = 1; i < values.length; i++) d += ` L ${(pad + step * i).toFixed(2)} ${normY(values[i]!).toFixed(2)}`;
   return d;
 }
-
-type DimItem = { id: number; name: string; micromarketId?: number | null; pincode?: string | null };
-type DimDoc = { cityId: number; items: DimItem[] };
-
-// -----------------------------
-// Export helpers (exported)
-// -----------------------------
-export function isoCompactNow() {
+function isoCompactNow() {
   const d = new Date();
-  const pad2 = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}_${pad2(d.getHours())}${pad2(d.getMinutes())}${pad2(d.getSeconds())}`;
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+}
+function escapeHtml(s: string) {
+  return s.replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch] ?? ch);
 }
 
-export function downloadTextFile(filename: string, content: string, mime = "application/json") {
-  const blob = new Blob([content], { type: mime });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
+const hitLayerFor: Record<InspectKind, string> = {
+  micromarkets: LYR.hitMm,
+  localities: LYR.hitLoc,
+  projects: LYR.hitProjects,
+  roads: LYR.hitRoads,
+  city: LYR.hitCity,
+};
+
+// Panel building blocks (module scope so their identity is stable across renders;
+// defining them inside the component would remount inputs on every keystroke).
+function Section({ title, children, right }: { title: string; children: React.ReactNode; right?: React.ReactNode }) {
+  return (
+    <div style={{ marginBottom: 12, padding: 10, border: `1px solid ${UI.panelBorder}`, borderRadius: 8, background: "rgba(255,255,255,0.03)" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+        <div style={{ fontWeight: 600 }}>{title}</div>
+        {right}
+      </div>
+      {children}
+    </div>
+  );
+}
+function Check({ label, checked, onChange, disabled, hint }: { label: string; checked: boolean; onChange: (v: boolean) => void; disabled?: boolean; hint?: string }) {
+  return (
+    <label style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 6, fontSize: 12, opacity: disabled ? 0.55 : 1 }} title={hint}>
+      <input type="checkbox" checked={checked} disabled={disabled} onChange={(e) => onChange(e.target.checked)} />
+      {label}
+    </label>
+  );
+}
+function Label({ children }: { children: React.ReactNode }) {
+  return <div style={{ fontSize: 12, opacity: 0.9, marginBottom: 4 }}>{children}</div>;
 }
 
-export function downloadDataUrl(filename: string, dataUrl: string) {
-  const a = document.createElement("a");
-  a.href = dataUrl;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-}
-
-export function exportMapPng(map: Map, filename: string) {
-  const canvas = map.getCanvas();
-  const dataUrl = canvas.toDataURL("image/png");
-  downloadDataUrl(filename, dataUrl);
-}
-
+// -----------------------------------------------------------------------------
+// Component
+// -----------------------------------------------------------------------------
 export default function MapView() {
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const mapRef = useRef<Map | null>(null);
+  const mapRef = useRef<MapboxMap | null>(null);
+  const engineRef = useRef<ChoroplethEngine | null>(null);
+  const indexRef = useRef<FeatureIndex>(new FeatureIndex());
+  const popupRef = useRef<mapboxgl.Popup | null>(null);
+  const hoverStateRef = useRef<{ level: Level; id: number } | null>(null);
 
   const [mapReady, setMapReady] = useState(false);
-
   const [hoverInfo, setHoverInfo] = useState<PickInfo | null>(null);
   const [clickInfo, setClickInfo] = useState<PickInfo | null>(null);
 
-  const [inspectTarget, setInspectTarget] = useState<InspectTarget>("localities");
-  const inspectTargetRef = useRef<InspectTarget>(inspectTarget);
-  useEffect(() => {
-    inspectTargetRef.current = inspectTarget;
-  }, [inspectTarget]);
+  // Drill-down state (driven by the camera)
+  const [band, setBand] = useState<ZoomBand>("micromarkets");
+  const [zoomDisplay, setZoomDisplay] = useState(DEFAULT_ZOOM);
+  const [focus, setFocus] = useState<Focus>(NO_FOCUS);
+  const [projectsInView, setProjectsInView] = useState(0);
+  // Bumped whenever the style (re)loads so every map-touching effect re-applies itself.
+  const [styleEpoch, setStyleEpoch] = useState(0);
+  const [restrictLoc, setRestrictLoc] = useState(true);
+  const [restrictProj, setRestrictProj] = useState(true);
 
-  const [showLocalities, setShowLocalities] = useState(true);
-  const [showMicromarkets, setShowMicromarkets] = useState(true);
+  // Layers
+  const [showHeat, setShowHeat] = useState(false);
   const [showProjects, setShowProjects] = useState(true);
-  const [showRoads, setShowRoads] = useState(true);
+  const [showRoads, setShowRoads] = useState(false);
+  const [showLabels, setShowLabels] = useState(true);
+  const [extrude, setExtrude] = useState(false);
+  const [inspectTarget, setInspectTarget] = useState<InspectTarget>("auto");
 
-  // Basemap controls
-  const [lightPreset, setLightPreset] = useState<LightPreset>("day");
-  const [enable3D, setEnable3D] = useState(false);
+  // Basemap
+  const [lightPreset, setLightPreset] = useState<LightPreset>("night");
+  const [theme, setTheme] = useState<BasemapTheme>("default");
+  const [enable3D, setEnable3D] = useState(true);
+  const [terrain, setTerrain] = useState(false);
+  const [showPlaceLabels, setShowPlaceLabels] = useState(true);
+  const [showRoadLabels, setShowRoadLabels] = useState(false);
+  const [showPoiLabels, setShowPoiLabels] = useState(false);
 
-  // Choropleth controls (v2.3)
+  // Choropleth
   const [enableChoropleth, setEnableChoropleth] = useState(true);
   const [metricKey, setMetricKey] = useState<string>("asking_psf");
-  const [choroplethLevel, setChoroplethLevel] = useState<ChoroplethLevel>("micromarkets");
+  const [levelMode, setLevelMode] = useState<LevelMode>("auto");
+  const [scaleMode, setScaleMode] = useState<ScaleMode>("fixed");
   const [metricMonth, setMetricMonth] = useState<string>("");
 
-  // Documents cache: metricKey -> level -> doc
-  const docsRef = useRef<Record<string, Partial<Record<ChoroplethLevel, MetricsDoc>>>>({});
-  const [activeDoc, setActiveDoc] = useState<MetricsDoc | null>(null);
+  const docsRef = useRef<Record<string, Partial<Record<Level, MetricsDoc>>>>({});
+  const [active, setActive] = useState<{ level: Level; doc: MetricsDoc } | null>(null);
 
-  // Legend info (data-wide, not just viewport)
-  const [legend, setLegend] = useState<{
-    stops: number[];
-    count: number;
-    missing: number;
-    min: number | null;
-    max: number | null;
-  }>({ stops: [], count: 0, missing: 0, min: null, max: null });
+  const [legend, setLegend] = useState<{ stops: number[]; count: number; missing: number; min: number | null; max: number | null }>({
+    stops: [],
+    count: 0,
+    missing: 0,
+    min: null,
+    max: null,
+  });
 
-  // Pin A / B (compare)
+  // Compare pins
   const [pinA, setPinA] = useState<PinnedSelection | null>(null);
   const [pinB, setPinB] = useState<PinnedSelection | null>(null);
 
-  // Timeline play
+  // Playback
   const [isPlaying, setIsPlaying] = useState(false);
   const isPlayingRef = useRef(false);
   useEffect(() => {
     isPlayingRef.current = isPlaying;
   }, [isPlaying]);
-
   const [loopPlay, setLoopPlay] = useState(true);
-  type PlaySpeed = "slow" | "normal" | "fast";
   const [playSpeed, setPlaySpeed] = useState<PlaySpeed>("normal");
-  const playSpeedMs = useMemo(() => (playSpeed === "slow" ? 1200 : playSpeed === "fast" ? 450 : 800), [playSpeed]);
+  const playStepMs = useMemo(() => (playSpeed === "slow" ? 1600 : playSpeed === "fast" ? 650 : 1000), [playSpeed]);
 
   // Search
   const [dimLocalities, setDimLocalities] = useState<DimItem[]>([]);
   const [dimMicromarkets, setDimMicromarkets] = useState<DimItem[]>([]);
   const [searchQuery, setSearchQuery] = useState("");
-  const [searchScope, setSearchScope] = useState<ChoroplethLevel>("localities");
+  const [searchScope, setSearchScope] = useState<Level>("localities");
+  const [indexVersion, setIndexVersion] = useState(0);
 
-  // SHIFT state cache (fixes cases where click event loses modifier state)
   const shiftDownRef = useRef(false);
-
   const token = process.env.NEXT_PUBLIC_MAPBOX_TOKEN;
 
-  const vectorSources = useMemo(() => {
-    return {
-      city: `mapbox://${TILESETS.city.id}`,
-      micromarkets: `mapbox://${TILESETS.micromarkets.id}`,
-      localities: `mapbox://${TILESETS.localities.id}`,
-      roads: `mapbox://${TILESETS.roads.id}`,
-      projects: `mapbox://${TILESETS.projects.id}`,
+  // ---------------------------------------------------------------------------
+  // Derived
+  // ---------------------------------------------------------------------------
+  const effectiveLevel: Level = useMemo(() => {
+    if (levelMode !== "auto") return levelMode;
+    return band === "micromarkets" ? "micromarkets" : "localities";
+  }, [levelMode, band]);
+
+  const effectiveInspect: InspectKind = useMemo(() => {
+    if (inspectTarget !== "auto") return inspectTarget;
+    if (band === "projects" && showProjects) return "projects";
+    if (band === "micromarkets") return "micromarkets";
+    return "localities";
+  }, [inspectTarget, band, showProjects]);
+
+  const locById = useMemo(() => {
+    const m = new Map<number, DimItem>();
+    for (const d of dimLocalities) m.set(d.id, d);
+    return m;
+  }, [dimLocalities]);
+  const mmById = useMemo(() => {
+    const m = new Map<number, DimItem>();
+    for (const d of dimMicromarkets) m.set(d.id, d);
+    return m;
+  }, [dimMicromarkets]);
+  const locIdsByMm = useMemo(() => {
+    const m = new Map<number, number[]>();
+    for (const d of dimLocalities) {
+      const mm = d.micromarketId ?? null;
+      if (mm === null) continue;
+      if (!m.has(mm)) m.set(mm, []);
+      m.get(mm)!.push(d.id);
+    }
+    return m;
+  }, [dimLocalities]);
+
+  const activeDoc = active && active.level === effectiveLevel ? active.doc : null;
+  const monthOptions = useMemo(() => active?.doc.months ?? [], [active]);
+  const def = useMemo(() => getMetricDef(metricKey), [metricKey]);
+  const palette = useMemo(() => paletteFor(lightPreset, def.bucketCount), [lightPreset, def.bucketCount]);
+  const bucketRanges = useMemo(() => formatBucketRanges(legend.stops), [legend.stops]);
+
+  // Latest-state ref for map event handlers (avoids stale closures).
+  const latest = useRef({
+    effectiveLevel,
+    effectiveInspect,
+    activeDoc,
+    metricMonth,
+    focus,
+    restrictLoc,
+    restrictProj,
+    locById,
+    mmById,
+    enableChoropleth,
+    enable3D,
+    def,
+    playStepMs,
+    lightPreset,
+    metricKey,
+    inspectAuto: inspectTarget === "auto",
+  });
+  useEffect(() => {
+    latest.current = {
+      effectiveLevel,
+      effectiveInspect,
+      activeDoc,
+      metricMonth,
+      focus,
+      restrictLoc,
+      restrictProj,
+      locById,
+      mmById,
+      enableChoropleth,
+      enable3D,
+      def,
+      playStepMs,
+      lightPreset,
+      metricKey,
+      inspectAuto: inspectTarget === "auto",
     };
-  }, []);
+  });
 
   const stopPlayback = () => {
     if (isPlayingRef.current) setIsPlaying(false);
   };
 
-  const resetView = () => {
-    stopPlayback();
-    const map = mapRef.current;
-    if (!map) return;
-    map.easeTo({
-      center: DEFAULT_CENTER as unknown as LngLatLike,
-      zoom: DEFAULT_ZOOM,
-      bearing: enable3D ? -20 : 0,
-      pitch: enable3D ? 60 : 0,
-      duration: 650,
-    });
-  };
-
-  // -----------------------------
-  // Export handlers (UI + keyboard)
-  // -----------------------------
-  const buildExportBaseName = () => {
-    const monthLabel = metricMonth ? metricMonth.replaceAll("-", "") : "nomonth";
-    return `map_${metricKey}_${choroplethLevel}_${monthLabel}_${isoCompactNow()}`;
-  };
-
-  const handleExportPng = () => {
-    const map = mapRef.current;
-    if (!map) return;
-
-    try {
-      const name = `${buildExportBaseName()}.png`;
-      exportMapPng(map, name);
-    } catch (e) {
-      console.error("PNG export failed:", e);
-      alert(
-        "PNG export failed. If you're using external images/icons without CORS, the canvas can become tainted. Check console for details."
-      );
-    }
-  };
-
-  const handleExportStateJson = () => {
-    const state = {
-      metricKey,
-      choroplethLevel,
-      metricMonth,
-      lightPreset,
-      enable3D,
-      enableChoropleth,
-      pinA,
-      pinB,
-      exportedAt: new Date().toISOString(),
-    };
-    const name = `${buildExportBaseName()}_state.json`;
-    downloadTextFile(name, JSON.stringify(state, null, 2), "application/json");
-  };
-
-  // -----------------------------
-  // URL state: read once at mount (shareable state)
-  // -----------------------------
+  // ---------------------------------------------------------------------------
+  // URL state
+  // ---------------------------------------------------------------------------
+  const initialCamRef = useRef<{ lng: number; lat: number; zoom: number; pitch?: number; bearing?: number } | null>(null);
   useEffect(() => {
     const sp = new URLSearchParams(window.location.search);
-
+    const cam = sp.get("cam");
+    if (cam) {
+      const p = cam.split(",").map(Number);
+      if (p.length >= 3 && p.slice(0, 3).every((x) => Number.isFinite(x))) {
+        initialCamRef.current = {
+          lng: p[0]!,
+          lat: p[1]!,
+          zoom: p[2]!,
+          pitch: Number.isFinite(p[3]) ? p[3] : undefined,
+          bearing: Number.isFinite(p[4]) ? p[4] : undefined,
+        };
+      }
+    }
     const m = sp.get("metric");
     const lvl = sp.get("level");
     const month = sp.get("month");
     const lp = sp.get("light");
+    const th = sp.get("theme");
     const d3 = sp.get("d3");
     const ch = sp.get("ch");
+    const heat = sp.get("heat");
+    const scale = sp.get("scale");
+    const ex = sp.get("ex");
 
-    if (m) setMetricKey(m);
-    if (lvl === "micromarkets" || lvl === "localities") setChoroplethLevel(lvl);
+    if (m && METRICS.some((x) => x.key === m)) setMetricKey(m);
+    if (lvl === "auto" || lvl === "micromarkets" || lvl === "localities") setLevelMode(lvl);
     if (month) setMetricMonth(month);
-
     if (lp === "dawn" || lp === "day" || lp === "dusk" || lp === "night") setLightPreset(lp);
+    if (th === "default" || th === "faded" || th === "monochrome") setTheme(th);
     if (d3 === "1") setEnable3D(true);
+    if (d3 === "0") setEnable3D(false);
     if (ch === "0") setEnableChoropleth(false);
+    if (heat === "1") setShowHeat(true);
+    if (scale === "fixed" || scale === "month") setScaleMode(scale);
+    if (ex === "1") setExtrude(true);
 
     const parsePin = (s: string | null): PinnedSelection | null => {
       if (!s) return null;
-      // format: "<level>:<joinKey>:<displayName?>"
       const parts = s.split(":");
-      const level = parts[0] as ChoroplethLevel;
+      const level = parts[0] as Level;
       const joinKey = decodeURIComponent(parts[1] ?? "");
       const displayName = decodeURIComponent(parts.slice(2).join(":") || joinKey);
       if (level !== "micromarkets" && level !== "localities") return null;
-      return { level, joinKey, displayName, featureId: null };
+      return { level, joinKey, displayName, featureId: level === "micromarkets" ? toNumericId(joinKey) : null };
     };
-
     setPinA(parsePin(sp.get("pinA")));
     setPinB(parsePin(sp.get("pinB")));
   }, []);
 
-  // Write URL state (replaceState)
   useEffect(() => {
     const sp = new URLSearchParams(window.location.search);
-
     sp.set("metric", metricKey);
-    sp.set("level", choroplethLevel);
+    sp.set("level", levelMode);
     if (metricMonth) sp.set("month", metricMonth);
     sp.set("light", lightPreset);
+    sp.set("theme", theme);
     sp.set("d3", enable3D ? "1" : "0");
     sp.set("ch", enableChoropleth ? "1" : "0");
-
-    const encPin = (p: PinnedSelection | null) => {
-      if (!p) return null;
-      return `${p.level}:${encodeURIComponent(p.joinKey)}:${encodeURIComponent(p.displayName)}`;
-    };
-
+    sp.set("heat", showHeat ? "1" : "0");
+    sp.set("scale", scaleMode);
+    sp.set("ex", extrude ? "1" : "0");
+    const encPin = (p: PinnedSelection | null) =>
+      p ? `${p.level}:${encodeURIComponent(p.joinKey)}:${encodeURIComponent(p.displayName)}` : null;
     const a = encPin(pinA);
     const b = encPin(pinB);
     if (a) sp.set("pinA", a);
     else sp.delete("pinA");
     if (b) sp.set("pinB", b);
     else sp.delete("pinB");
+    window.history.replaceState({}, "", `${window.location.pathname}?${sp.toString()}`);
+  }, [metricKey, levelMode, metricMonth, lightPreset, theme, enable3D, enableChoropleth, showHeat, scaleMode, extrude, pinA, pinB]);
 
-    const next = `${window.location.pathname}?${sp.toString()}`;
-    window.history.replaceState({}, "", next);
-  }, [metricKey, choroplethLevel, metricMonth, lightPreset, enable3D, enableChoropleth, pinA, pinB]);
-
-  // -----------------------------
-  // Load dims for search (public/dim/*.json)
-  // -----------------------------
+  // ---------------------------------------------------------------------------
+  // Dims (search + drill-down joins)
+  // ---------------------------------------------------------------------------
   useEffect(() => {
     let cancelled = false;
-    async function load() {
+    (async () => {
       try {
         const [locRes, mmRes] = await Promise.all([
           fetch("/dim/localities_city13.json", { cache: "no-store" }),
           fetch("/dim/micromarkets_city13.json", { cache: "no-store" }),
         ]);
-        if (!locRes.ok) throw new Error(`Failed localities dim: ${locRes.status}`);
-        if (!mmRes.ok) throw new Error(`Failed micromarkets dim: ${mmRes.status}`);
-
+        if (!locRes.ok || !mmRes.ok) throw new Error(`dims: ${locRes.status}/${mmRes.status}`);
         const loc = (await locRes.json()) as DimDoc;
         const mm = (await mmRes.json()) as DimDoc;
         if (cancelled) return;
-
         setDimLocalities(loc.items ?? []);
         setDimMicromarkets(mm.items ?? []);
       } catch (e) {
-        console.warn("Dim search docs not found yet (run build_dims_public.py):", e);
+        console.warn("Dim docs not found (run scripts/build_dims_public.py):", e);
       }
-    }
-    load();
+    })();
     return () => {
       cancelled = true;
     };
   }, []);
 
-  // -----------------------------
-  // Load active metrics doc (metricKey + choroplethLevel)
-  // -----------------------------
+  // ---------------------------------------------------------------------------
+  // Metrics docs: fetch both levels for the metric (so zooming across the
+  // level threshold and pinned series never wait), then pick the active one.
+  // ---------------------------------------------------------------------------
+  const [docsVersion, setDocsVersion] = useState(0);
   useEffect(() => {
     let cancelled = false;
-
-    async function loadDoc() {
-      const def = getMetricDef(metricKey);
-      const url = def.files[choroplethLevel];
-      if (!url) return;
-
-      const cached = docsRef.current[metricKey]?.[choroplethLevel];
-      if (cached) {
-        setActiveDoc(cached);
-        return;
+    const d = getMetricDef(metricKey);
+    const levels: Level[] = ["micromarkets", "localities"];
+    const missing = levels.filter((l) => !docsRef.current[metricKey]?.[l] && d.files[l]);
+    if (!missing.length) return;
+    (async () => {
+      const results = await Promise.allSettled(
+        missing.map(async (l) => {
+          const res = await fetch(d.files[l], { cache: "no-store" });
+          if (!res.ok) throw new Error(`metrics ${res.status} (${d.files[l]})`);
+          return [l, (await res.json()) as MetricsDoc] as const;
+        })
+      );
+      if (cancelled) return;
+      docsRef.current[metricKey] = docsRef.current[metricKey] || {};
+      let any = false;
+      for (const r of results) {
+        if (r.status === "fulfilled") {
+          docsRef.current[metricKey]![r.value[0]] = r.value[1];
+          any = true;
+        } else console.error("Failed to load metrics JSON:", r.reason);
       }
-
-      try {
-        const res = await fetch(url, { cache: "no-store" });
-        if (!res.ok) throw new Error(`Failed metrics doc: ${res.status} (${url})`);
-        const doc = (await res.json()) as MetricsDoc;
-
-        if (cancelled) return;
-
-        docsRef.current[metricKey] = docsRef.current[metricKey] || {};
-        docsRef.current[metricKey]![choroplethLevel] = doc;
-        setActiveDoc(doc);
-
-        // default month -> latest
-        const latest = doc.months?.[doc.months.length - 1] ?? "";
-        setMetricMonth((prev) => (prev ? prev : latest));
-      } catch (e) {
-        console.error("Failed to load metrics JSON:", e);
-      }
-    }
-
-    loadDoc();
+      if (any) setDocsVersion((v) => v + 1);
+    })();
     return () => {
       cancelled = true;
     };
-  }, [metricKey, choroplethLevel]);
+  }, [metricKey]);
 
-  const monthOptions = useMemo(() => activeDoc?.months ?? [], [activeDoc]);
+  useEffect(() => {
+    const doc = docsRef.current[metricKey]?.[effectiveLevel];
+    if (!doc) return;
+    setActive({ level: effectiveLevel, doc });
+    setMetricMonth((prev) => prev || (doc.months?.[doc.months.length - 1] ?? ""));
+  }, [metricKey, effectiveLevel, docsVersion]);
 
-  // Keep metricMonth valid
   useEffect(() => {
     if (!monthOptions.length) return;
-    if (!metricMonth || !monthOptions.includes(metricMonth)) {
-      setMetricMonth(monthOptions[monthOptions.length - 1]);
-    }
+    if (!metricMonth || !monthOptions.includes(metricMonth)) setMetricMonth(monthOptions[monthOptions.length - 1]!);
   }, [monthOptions, metricMonth]);
 
-  // Slider index
   const metricMonthIndex = useMemo(() => {
     if (!monthOptions.length) return 0;
     const idx = monthOptions.indexOf(metricMonth);
@@ -569,31 +533,27 @@ export default function MapView() {
       setIsPlaying(false);
       return;
     }
-
     const id = window.setInterval(() => {
       setMetricMonth((prev) => {
-        const curIdx = monthOptions.indexOf(prev);
-        const safeIdx = curIdx >= 0 ? curIdx : 0;
-        let nextIdx = safeIdx + 1;
-
-        if (nextIdx >= monthOptions.length) {
+        const cur = monthOptions.indexOf(prev);
+        let next = (cur >= 0 ? cur : 0) + 1;
+        if (next >= monthOptions.length) {
           if (!loopPlay) {
             window.clearInterval(id);
             setIsPlaying(false);
-            return monthOptions[monthOptions.length - 1];
+            return monthOptions[monthOptions.length - 1]!;
           }
-          nextIdx = 0;
+          next = 0;
         }
-        return monthOptions[nextIdx];
+        return monthOptions[next]!;
       });
-    }, playSpeedMs);
-
+    }, playStepMs);
     return () => window.clearInterval(id);
-  }, [isPlaying, enableChoropleth, monthOptions, loopPlay, playSpeedMs]);
+  }, [isPlaying, enableChoropleth, monthOptions, loopPlay, playStepMs]);
 
-  // -----------------------------
+  // ---------------------------------------------------------------------------
   // Map init
-  // -----------------------------
+  // ---------------------------------------------------------------------------
   useEffect(() => {
     if (!containerRef.current) return;
     if (!token) {
@@ -603,702 +563,709 @@ export default function MapView() {
     if (mapRef.current) return;
 
     mapboxgl.accessToken = token;
+    const init = latest.current;
+    const cam = initialCamRef.current;
 
     const map = new mapboxgl.Map({
       container: containerRef.current,
       style: "mapbox://styles/mapbox/standard",
-      center: DEFAULT_CENTER,
-      zoom: DEFAULT_ZOOM,
-      pitch: 0,
-      bearing: 0,
+      center: cam ? [cam.lng, cam.lat] : DEFAULT_CENTER,
+      zoom: cam ? cam.zoom : DEFAULT_ZOOM,
+      pitch: cam?.pitch !== undefined ? cam.pitch : init.enable3D ? DEFAULT_PITCH_3D : 0,
+      bearing: cam?.bearing !== undefined ? cam.bearing : init.enable3D ? DEFAULT_BEARING_3D : 0,
       antialias: true,
-      preserveDrawingBuffer: true, // ✅ required for PNG export
-      config: { basemap: { lightPreset } },
+      preserveDrawingBuffer: true, // required for PNG export
+      config: {
+        basemap: {
+          lightPreset: init.lightPreset,
+          theme: "default",
+          show3dObjects: init.enable3D,
+          showPlaceLabels: true,
+          showRoadLabels: false,
+          showPointOfInterestLabels: false,
+          showTransitLabels: false,
+        },
+      },
     });
 
-    // IMPORTANT: Shift is used for Pin-B selection. Disable Mapbox BoxZoom (Shift+drag).
     try {
-      map.boxZoom.disable();
+      map.boxZoom.disable(); // Shift+drag is reserved for pin-B selection
     } catch {
       // ignore
     }
 
     mapRef.current = map;
+    // Expose for debugging / automated checks (e.g. window.__gmMap.getZoom()).
+    (window as unknown as { __gmMap?: MapboxMap }).__gmMap = map;
     map.addControl(new mapboxgl.NavigationControl({ visualizePitch: true }), "top-right");
+    map.addControl(new mapboxgl.FullscreenControl(), "top-right");
+    map.addControl(new mapboxgl.ScaleControl({ unit: "metric", maxWidth: 120 }), "bottom-left");
+
+    const popup = new mapboxgl.Popup({ closeButton: false, closeOnClick: false, offset: 12, maxWidth: "280px", className: "gm-popup" });
+    popupRef.current = popup;
 
     map.on("load", () => {
+      addDataSources(map);
+      addDataLayers(map, latest.current.lightPreset);
+      applyPresetColors(map, latest.current.lightPreset);
+      engineRef.current = new ChoroplethEngine(map);
       setMapReady(true);
 
-      map.addSource("city-src", { type: "vector", url: vectorSources.city });
-      map.addSource("micromarkets-src", { type: "vector", url: vectorSources.micromarkets });
-      map.addSource("localities-src", { type: "vector", url: vectorSources.localities });
-      map.addSource("roads-src", { type: "vector", url: vectorSources.roads });
-      map.addSource("projects-src", { type: "vector", url: vectorSources.projects });
+      // ---- camera-driven state ----
+      let lastBand: ZoomBand = zoomBand(map.getZoom());
+      setBand(lastBand);
+      setZoomDisplay(Math.round(map.getZoom() * 10) / 10);
+      const onZoom = () => {
+        const z = map.getZoom();
+        const b = zoomBand(z);
+        if (b !== lastBand) {
+          lastBand = b;
+          setBand(b);
+        }
+        setZoomDisplay(Math.round(z * 10) / 10);
+      };
+      map.on("zoom", onZoom);
 
-      map.addLayer({
-        id: "city-outline",
-        type: "line",
-        source: "city-src",
-        "source-layer": TILESETS.city.sourceLayer,
-        paint: { "line-width": 2 },
-      });
+      const updateFocus = () => {
+        const z = map.getZoom();
+        const centerPx = map.project(map.getCenter());
+        setFocus((prev) => {
+          let mmId = prev.mmId;
+          let mmName = prev.mmName;
+          let locId = prev.locId;
+          let locName = prev.locName;
 
-      map.addLayer({
-        id: "micromarkets-fill",
-        type: "fill",
-        source: "micromarkets-src",
-        "source-layer": TILESETS.micromarkets.sourceLayer,
-        paint: { "fill-opacity": 0.08 },
-      });
-      map.addLayer({
-        id: "micromarkets-outline",
-        type: "line",
-        source: "micromarkets-src",
-        "source-layer": TILESETS.micromarkets.sourceLayer,
-        paint: { "line-width": 1 },
-      });
+          if (z >= Z_LOC - Z_FADE) {
+            const f = map.queryRenderedFeatures(centerPx, { layers: [LYR.hitMm] })[0] as RenderedFeature | undefined;
+            const id = toNumericId(f?.id);
+            if (f && id !== null) {
+              mmId = id;
+              mmName = getStrProp(f.properties, "MicroMarketName") || `Micromarket ${id}`;
+            }
+          } else {
+            mmId = null;
+            mmName = "";
+          }
 
-      map.addLayer({
-        id: "localities-fill",
-        type: "fill",
-        source: "localities-src",
-        "source-layer": TILESETS.localities.sourceLayer,
-        paint: { "fill-opacity": 0.06 },
-      });
-      map.addLayer({
-        id: "localities-outline",
-        type: "line",
-        source: "localities-src",
-        "source-layer": TILESETS.localities.sourceLayer,
-        paint: { "line-width": 0.7 },
-      });
+          if (z >= Z_PROJ - Z_FADE) {
+            const f = map.queryRenderedFeatures(centerPx, { layers: [LYR.hitLoc] })[0] as RenderedFeature | undefined;
+            const id = toNumericId(f?.id);
+            if (f && id !== null) {
+              locId = id;
+              locName = getStrProp(f.properties, "LocalityName") || `Locality ${id}`;
+            }
+          } else {
+            locId = null;
+            locName = "";
+          }
 
-      map.addLayer({
-        id: "roads-line",
-        type: "line",
-        source: "roads-src",
-        "source-layer": TILESETS.roads.sourceLayer,
-        paint: { "line-width": 1.2 },
-      });
+          if (mmId === prev.mmId && locId === prev.locId && mmName === prev.mmName && locName === prev.locName) return prev;
+          return { mmId, mmName, locId, locName };
+        });
+      };
+      map.on("moveend", updateFocus);
 
-      map.addLayer({
-        id: "projects-circle",
-        type: "circle",
-        source: "projects-src",
-        "source-layer": TILESETS.projects.sourceLayer,
-        paint: { "circle-radius": 3, "circle-opacity": 0.75 },
-      });
+      // Camera -> URL (shareable view)
+      const writeCam = () => {
+        const c = map.getCenter();
+        const sp = new URLSearchParams(window.location.search);
+        sp.set(
+          "cam",
+          [c.lng.toFixed(5), c.lat.toFixed(5), map.getZoom().toFixed(2), map.getPitch().toFixed(0), map.getBearing().toFixed(0)].join(",")
+        );
+        window.history.replaceState({}, "", `${window.location.pathname}?${sp.toString()}`);
+      };
+      map.on("moveend", writeCam);
 
-      // HIT layers
-      map.addLayer({
-        id: HIT_LAYERS.city,
-        type: "line",
-        source: "city-src",
-        "source-layer": TILESETS.city.sourceLayer,
-        paint: { "line-width": 12, "line-opacity": 0 },
-      });
+      // ---- idle: index polygons for labels/search + feature-state for new tiles ----
+      let lastScanKey = "";
+      let scanRetries = 0;
+      const dbg = { refreshes: 0, lastError: "" as string, index: indexRef.current };
+      (window as unknown as { __gmDebug?: typeof dbg }).__gmDebug = dbg;
+      const refresh = () => {
+        dbg.refreshes++;
+        try {
+          refreshInner();
+        } catch (e) {
+          dbg.lastError = String(e);
+          console.error("map refresh failed:", e);
+        }
+      };
+      const refreshInner = () => {
+        const idx = indexRef.current;
+        const { locById } = latest.current;
+        // Re-index only when the camera (or the dims) changed; idle also fires after every cross-fade.
+        const c = map.getCenter();
+        // Key the scan on the camera, the dims and how many polygon features the loaded
+        // tiles currently hold: more tiles landing changes the key and triggers a rescan,
+        // and an early refresh that sees no tiles yet keeps retrying (bounded).
+        const countFeats = (src: string, sourceLayer: string) => {
+          try {
+            return map.querySourceFeatures(src, { sourceLayer }).length;
+          } catch {
+            return 0;
+          }
+        };
+        const mmFeats = countFeats(SRC.micromarkets, TILESETS.micromarkets.sourceLayer);
+        const locFeats = countFeats(SRC.localities, TILESETS.localities.sourceLayer);
+        const scanKey = `${c.lng.toFixed(4)},${c.lat.toFixed(4)},${map.getZoom().toFixed(2)},${locById.size},${mmFeats},${locFeats}`;
+        const tilesReady = mmFeats > 0 && locFeats > 0;
+        if (!tilesReady && scanKey !== lastScanKey && scanRetries < 60) {
+          // Tiles for this camera are still loading: try again shortly (bounded).
+          scanRetries++;
+          window.setTimeout(scheduleRefresh, 750);
+        }
+        if (tilesReady && scanKey !== lastScanKey) {
+          lastScanKey = scanKey;
+          scanRetries = 0;
+          const c1 = idx.scan(map, "micromarkets", SRC.micromarkets, TILESETS.micromarkets.sourceLayer, "MicroMarketName");
+          const c2 = idx.scan(map, "localities", SRC.localities, TILESETS.localities.sourceLayer, "LocalityName", (id) => {
+            const d = locById.get(id);
+            return d?.micromarketId ?? null;
+          });
+          if (c1 || c2) {
+            const src = map.getSource(SRC.labels) as mapboxgl.GeoJSONSource | undefined;
+            src?.setData(idx.toLabelGeoJSON());
+            setIndexVersion(idx.getVersion());
+          }
+        }
+        const eng = engineRef.current;
+        const { activeDoc, metricMonth, effectiveLevel, enableChoropleth } = latest.current;
+        if (eng && enableChoropleth && activeDoc && metricMonth) eng.syncNewIds(effectiveLevel, activeDoc, metricMonth);
+        updateFocus();
 
-      map.addLayer({
-        id: HIT_LAYERS.micromarkets,
-        type: "fill",
-        source: "micromarkets-src",
-        "source-layer": TILESETS.micromarkets.sourceLayer,
-        paint: { "fill-color": "#000000", "fill-opacity": 0 },
-      });
+        let n = 0;
+        if (map.getZoom() >= Z_PROJ - Z_FADE && map.getLayer(LYR.projectsCircle)) {
+          try {
+            n = map.queryRenderedFeatures({ layers: [LYR.projectsCircle] }).length;
+          } catch {
+            n = 0;
+          }
+        }
+        setProjectsInView(n);
+      };
 
-      map.addLayer({
-        id: HIT_LAYERS.localities,
-        type: "fill",
-        source: "localities-src",
-        "source-layer": TILESETS.localities.sourceLayer,
-        paint: { "fill-color": "#000000", "fill-opacity": 0 },
-      });
+      // Standard-style reloads (e.g. a theme change) can drop or reset our layers.
+      // Re-add what is missing and bump the epoch so React effects re-apply state.
+      const ensureLayers = () => {
+        if (!map.isStyleLoaded()) return;
+        if (map.getLayer(LYR.mmFillA)) return;
+        try {
+          addDataSources(map);
+          addDataLayers(map, latest.current.lightPreset);
+          applyPresetColors(map, latest.current.lightPreset);
+          engineRef.current = new ChoroplethEngine(map);
+          lastScanKey = "";
+          setStyleEpoch((v) => v + 1);
+        } catch (e) {
+          console.warn("Re-adding data layers failed:", e);
+        }
+      };
+      const onStyleLoad = () => {
+        ensureLayers();
+        engineRef.current?.reset();
+        lastScanKey = "";
+        setStyleEpoch((v) => v + 1);
+        scheduleRefresh();
+      };
+      map.on("style.load", onStyleLoad);
+      map.on("styledata", ensureLayers);
+      // `idle` can be withheld for a long time by the Standard basemap (3D models,
+      // transitions), so also refresh after camera moves and when our tiles land.
+      let refreshTimer: number | null = null;
+      const scheduleRefresh = () => {
+        if (refreshTimer !== null) window.clearTimeout(refreshTimer);
+        refreshTimer = window.setTimeout(() => {
+          refreshTimer = null;
+          refresh();
+        }, 250);
+      };
+      // Any tile activity on our polygon/point sources schedules a (debounced) refresh;
+      // refresh itself checks whether the sources are fully loaded before indexing.
+      const onSourceData = (e: { sourceId?: string }) => {
+        if (e.sourceId === SRC.localities || e.sourceId === SRC.micromarkets || e.sourceId === SRC.projects) scheduleRefresh();
+      };
+      map.on("idle", refresh);
+      map.on("moveend", scheduleRefresh);
+      map.on("sourcedata", onSourceData);
+      // Startup safety net in case neither idle nor a source event arrives promptly.
+      const startupTimers = [800, 2500, 6000].map((ms) => window.setTimeout(scheduleRefresh, ms));
 
-      map.addLayer({
-        id: HIT_LAYERS.roads,
-        type: "line",
-        source: "roads-src",
-        "source-layer": TILESETS.roads.sourceLayer,
-        paint: { "line-width": 12, "line-opacity": 0 },
-      });
-
-      map.addLayer({
-        id: HIT_LAYERS.projects,
-        type: "circle",
-        source: "projects-src",
-        "source-layer": TILESETS.projects.sourceLayer,
-        paint: { "circle-radius": 10, "circle-opacity": 0 },
-      });
-
-      // Pin outline layers (A/B) — micromarkets by feature id, localities by LocalityName
-      map.addLayer({
-        id: PIN_LAYERS.mmA,
-        type: "line",
-        source: "micromarkets-src",
-        "source-layer": TILESETS.micromarkets.sourceLayer,
-        filter: ["==", ["id"], -999999],
-        paint: { "line-color": UI.pinA, "line-width": 3 },
-      });
-      map.addLayer({
-        id: PIN_LAYERS.mmB,
-        type: "line",
-        source: "micromarkets-src",
-        "source-layer": TILESETS.micromarkets.sourceLayer,
-        filter: ["==", ["id"], -999999],
-        paint: { "line-color": UI.pinB, "line-width": 3 },
-      });
-      map.addLayer({
-        id: PIN_LAYERS.locA,
-        type: "line",
-        source: "localities-src",
-        "source-layer": TILESETS.localities.sourceLayer,
-        filter: ["==", ["get", "LocalityName"], "__nope__"],
-        paint: { "line-color": UI.pinA, "line-width": 3 },
-      });
-      map.addLayer({
-        id: PIN_LAYERS.locB,
-        type: "line",
-        source: "localities-src",
-        "source-layer": TILESETS.localities.sourceLayer,
-        filter: ["==", ["get", "LocalityName"], "__nope__"],
-        paint: { "line-color": UI.pinB, "line-width": 3 },
-      });
-
-      // Stop playback on map interactions
+      // ---- playback stops on interaction ----
       const stop = () => stopPlayback();
       map.on("dragstart", stop);
-      map.on("zoomstart", stop);
-      map.on("rotatestart", stop);
-      map.on("pitchstart", stop);
-      map.on("movestart", stop);
+      map.on("wheel", stop);
       map.on("mousedown", stop);
       map.on("touchstart", stop);
 
-      // Track shift on mousedown (fixes shift losing state on click in some cases)
       const onMouseDown = (e: MapMouseEvent) => {
-        const oe = e.originalEvent;
-        shiftDownRef.current = isShiftPressed(oe) || isShiftPressed(e);
-      };
-      const onTouchStart = () => {
-        shiftDownRef.current = false;
+        shiftDownRef.current = isShiftPressed(e.originalEvent) || isShiftPressed(e);
       };
       map.on("mousedown", onMouseDown);
-      map.on("touchstart", onTouchStart);
 
-      // Pointer move RAF (performance)
+      // ---- hover ----
+      const setHover = (level: Level | null, id: number | null) => {
+        const prev = hoverStateRef.current;
+        if (prev && (prev.level !== level || prev.id !== id)) {
+          const s = prev.level === "micromarkets" ? SRC.micromarkets : SRC.localities;
+          const sl = prev.level === "micromarkets" ? TILESETS.micromarkets.sourceLayer : TILESETS.localities.sourceLayer;
+          map.setFeatureState({ source: s, sourceLayer: sl, id: prev.id }, { hover: false });
+          hoverStateRef.current = null;
+        }
+        if (level && id !== null && (!prev || prev.level !== level || prev.id !== id)) {
+          const s = level === "micromarkets" ? SRC.micromarkets : SRC.localities;
+          const sl = level === "micromarkets" ? TILESETS.micromarkets.sourceLayer : TILESETS.localities.sourceLayer;
+          map.setFeatureState({ source: s, sourceLayer: sl, id }, { hover: true });
+          hoverStateRef.current = { level, id };
+        }
+      };
+
+      const passesRestriction = (kind: InspectKind, props: Record<string, unknown>, id: number | null): boolean => {
+        const { focus, restrictLoc, restrictProj, locById } = latest.current;
+        if (kind === "localities" && restrictLoc && focus.mmId !== null && id !== null) {
+          const mm = locById.get(id)?.micromarketId ?? null;
+          if (mm !== null && mm !== focus.mmId) return false;
+        }
+        if (kind === "projects" && restrictProj && focus.locId !== null) {
+          const lid = toNumericId(props.LocalityID);
+          if (lid !== null && lid !== focus.locId) return false;
+        }
+        return true;
+      };
+
+      const describe = (kind: InspectKind, props: Record<string, unknown>, id: number | null): { name: string; html: string } => {
+        const { activeDoc, metricMonth, def, locById, mmById } = latest.current;
+        if (kind === "projects") {
+          const name = getStrProp(props, "ProjectName") || "Project";
+          const status = getStrProp(props, "Status");
+          const loc = locById.get(toNumericId(props.LocalityID) ?? -1)?.name ?? "";
+          const mm = mmById.get(toNumericId(props.MicroMarketID) ?? -1)?.name ?? "";
+          const g = STATUS_GROUPS.find((s) => s.match.includes(status));
+          const dot = `<span style="display:inline-block;width:8px;height:8px;border-radius:99px;background:${g?.color ?? "#9ca3af"};margin-right:6px"></span>`;
+          return {
+            name,
+            html: `<div class="gm-pop-title">${escapeHtml(name)}</div><div>${dot}${escapeHtml(status || "-")}</div><div class="gm-pop-muted">${escapeHtml(
+              [loc, mm].filter(Boolean).join(" · ")
+            )}</div>`,
+          };
+        }
+        if (kind === "micromarkets" || kind === "localities") {
+          const name = kind === "micromarkets" ? getStrProp(props, "MicroMarketName") || `Micromarket ${id}` : getStrProp(props, "LocalityName") || `Locality ${id}`;
+          const joinKey = kind === "micromarkets" ? String(id) : name;
+          const doc = docsRef.current[latest.current.metricKey]?.[kind] ?? (activeDoc && latest.current.effectiveLevel === kind ? activeDoc : null);
+          const row = doc ? doc.byMonth?.[metricMonth]?.[joinKey] : undefined;
+          const v = typeof row?.v === "number" ? fmtMoney(row.v) : "no data";
+          const n = typeof row?.n === "number" ? ` · n=${row.n}` : "";
+          return {
+            name,
+            html: `<div class="gm-pop-title">${escapeHtml(name)}</div><div>${escapeHtml(def.label)}: <b>${escapeHtml(v)}</b><span class="gm-pop-muted">${escapeHtml(
+              n
+            )}</span></div><div class="gm-pop-muted">${escapeHtml(metricMonth ? parseMonthLabel(metricMonth) : "")}</div>`,
+          };
+        }
+        if (kind === "roads") {
+          const name = getStrProp(props, "RoadName") || "Road";
+          return { name, html: `<div class="gm-pop-title">${escapeHtml(name)}</div>` };
+        }
+        const name = getStrProp(props, "CityName") || "City";
+        return { name, html: `<div class="gm-pop-title">${escapeHtml(name)}</div>` };
+      };
+
+      // Pick the topmost feature for the active inspect target; in auto mode at
+      // project zoom, fall back to the locality under the cursor.
+      const pickAt = (point: mapboxgl.PointLike): { kind: InspectKind; f: RenderedFeature } | null => {
+        const primary = latest.current.effectiveInspect;
+        const kinds: InspectKind[] = primary === "projects" && latest.current.inspectAuto ? ["projects", "localities"] : [primary];
+        for (const kind of kinds) {
+          let feats: RenderedFeature[] = [];
+          try {
+            feats = map.queryRenderedFeatures(point, { layers: [hitLayerFor[kind]] }) as unknown as RenderedFeature[];
+          } catch {
+            feats = [];
+          }
+          const f = feats.find((x) => passesRestriction(kind, (x.properties ?? {}) as Record<string, unknown>, toNumericId(x.id)));
+          if (f) return { kind, f };
+        }
+        return null;
+      };
+
       let rafId: number | null = null;
-      let lastMoveEvt: MapMouseEvent | null = null;
-
+      let lastMove: MapMouseEvent | null = null;
       const handleMove = () => {
         rafId = null;
-        const e = lastMoveEvt;
+        const e = lastMove;
         if (!e) return;
-
-        const m = mapRef.current;
-        if (!m) return;
-
-        const layer = targetToLayerId(inspectTargetRef.current);
-        const features = m.queryRenderedFeatures(e.point, { layers: [layer] });
-
-        if (!features.length) {
-          m.getCanvas().style.cursor = "";
+        const picked = pickAt(e.point);
+        if (!picked) {
+          map.getCanvas().style.cursor = "";
+          setHover(null, null);
+          popup.remove();
           setHoverInfo(null);
           return;
         }
-
-        m.getCanvas().style.cursor = "pointer";
-        const f = features[0]!;
+        const { kind, f } = picked;
         const props = (f.properties ?? {}) as Record<string, unknown>;
-
-        setHoverInfo({
-          layerId: getLayerId(f),
-          sourceLayer: getSourceLayer(f),
-          featureId: f.id ?? null,
-          propertyKeys: Object.keys(props),
-          properties: props,
-          lngLat: { lng: e.lngLat.lng, lat: e.lngLat.lat },
-        });
+        const id = toNumericId(f.id);
+        map.getCanvas().style.cursor = "pointer";
+        setHover(kind === "micromarkets" || kind === "localities" ? kind : null, id);
+        const d = describe(kind, props, id);
+        popup.setLngLat(e.lngLat).setHTML(d.html).addTo(map);
+        setHoverInfo({ kind, name: d.name, featureId: id, properties: props, lngLat: { lng: e.lngLat.lng, lat: e.lngLat.lat } });
       };
-
       const onMove = (e: MapMouseEvent) => {
-        lastMoveEvt = e;
-        if (rafId !== null) return;
-        rafId = window.requestAnimationFrame(handleMove);
+        lastMove = e;
+        if (rafId === null) rafId = window.requestAnimationFrame(handleMove);
       };
+      const onLeave = () => {
+        setHover(null, null);
+        popup.remove();
+        setHoverInfo(null);
+        map.getCanvas().style.cursor = "";
+      };
+      map.on("mousemove", onMove);
+      map.on("mouseout", onLeave);
 
-      // Click: pin A (normal click), pin B (Shift+Click)
+      // ---- click: pin + drill ----
       const onClick = (e: MapMouseEvent) => {
         stopPlayback();
-
-        const m = mapRef.current;
-        if (!m) return;
-
-        const layer = targetToLayerId(inspectTargetRef.current);
-        const features = m.queryRenderedFeatures(e.point, { layers: [layer] });
-
-        if (!features.length) {
+        const picked = pickAt(e.point);
+        if (!picked) {
           setClickInfo(null);
           return;
         }
-
-        const f = features[0]!;
+        const { kind, f } = picked;
         const props = (f.properties ?? {}) as Record<string, unknown>;
+        const id = toNumericId(f.id);
+        const d = describe(kind, props, id);
+        setClickInfo({ kind, name: d.name, featureId: id, properties: props, lngLat: { lng: e.lngLat.lng, lat: e.lngLat.lat } });
 
-        setClickInfo({
-          layerId: getLayerId(f),
-          sourceLayer: getSourceLayer(f),
-          featureId: f.id ?? null,
-          propertyKeys: Object.keys(props),
-          properties: props,
-          lngLat: { lng: e.lngLat.lng, lat: e.lngLat.lat },
-        });
-
-        const fid = toFeatureId(f.id);
-
-        // Robust: use originalEvent shiftKey OR cached shift from mousedown
-        const oe = e.originalEvent;
-        const assignToB = isShiftPressed(oe) || shiftDownRef.current === true;
-
-        // Reset cached shift after processing one click
+        const assignToB = isShiftPressed(e.originalEvent) || shiftDownRef.current === true;
         shiftDownRef.current = false;
 
-        if (layer === HIT_LAYERS.micromarkets && fid !== null) {
-          const name =
-            getStrProp(props, "MicroMarketName") ||
-            getStrProp(props, "MicromarketName") ||
-            getStrProp(props, "Micromarket") ||
-            `Micromarket ${String(fid)}`;
-
+        if ((kind === "micromarkets" || kind === "localities") && id !== null) {
           const next: PinnedSelection = {
-            level: "micromarkets",
-            joinKey: String(fid),
-            displayName: name,
-            featureId: fid,
+            level: kind,
+            joinKey: kind === "micromarkets" ? String(id) : d.name,
+            displayName: d.name,
+            featureId: id,
           };
-
           if (assignToB) setPinB(next);
           else setPinA(next);
 
-          fitToFeature(m, f);
-        } else if (layer === HIT_LAYERS.localities && fid !== null) {
-          const lname = getStrProp(props, "LocalityName") || "";
-          if (lname) {
-            const next: PinnedSelection = {
-              level: "localities",
-              joinKey: lname,
-              displayName: lname,
-              featureId: fid,
-            };
-            if (assignToB) setPinB(next);
-            else setPinA(next);
-
-            fitToFeature(m, f);
-          }
+          const entry = indexRef.current.get(kind, id);
+          const bounds = entry ? bboxToBounds(entry.bbox) : boundsFromGeometry(f.geometry);
+          if (bounds) map.fitBounds(bounds, kind === "micromarkets" ? FIT_MM : FIT_LOC);
         }
       };
-
-      map.on("mousemove", onMove);
       map.on("click", onClick);
 
-      const onKeyDown = (ev: KeyboardEvent) => {
-        if (ev.key === "Escape") {
-          stopPlayback();
-          setPinA(null);
-          setPinB(null);
-        }
-        if (ev.key === "r" || ev.key === "R") resetView();
-
-        // Export shortcuts
-        if (ev.key === "p" || ev.key === "P") handleExportPng();
-        if (ev.key === "j" || ev.key === "J") handleExportStateJson();
-      };
-      window.addEventListener("keydown", onKeyDown);
-
       map.once("remove", () => {
-        window.removeEventListener("keydown", onKeyDown);
+        map.off("zoom", onZoom);
+        map.off("moveend", updateFocus);
+        map.off("moveend", writeCam);
+        map.off("style.load", onStyleLoad);
+        map.off("styledata", ensureLayers);
+        map.off("idle", refresh);
+        map.off("moveend", scheduleRefresh);
+        map.off("sourcedata", onSourceData);
+        if (refreshTimer !== null) window.clearTimeout(refreshTimer);
+        for (const t of startupTimers) window.clearTimeout(t);
         map.off("dragstart", stop);
-        map.off("zoomstart", stop);
-        map.off("rotatestart", stop);
-        map.off("pitchstart", stop);
-        map.off("movestart", stop);
+        map.off("wheel", stop);
         map.off("mousedown", stop);
         map.off("touchstart", stop);
-
         map.off("mousedown", onMouseDown);
-        map.off("touchstart", onTouchStart);
-
         map.off("mousemove", onMove);
+        map.off("mouseout", onLeave);
         map.off("click", onClick);
         if (rafId !== null) window.cancelAnimationFrame(rafId);
       });
     });
 
     return () => {
+      popupRef.current?.remove();
       map.remove();
       mapRef.current = null;
+      engineRef.current = null;
+      setMapReady(false);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [token, vectorSources]);
+  }, [token]);
 
-  // -----------------------------
-  // Pin highlight filters sync (A/B)
-  // -----------------------------
+  // ---------------------------------------------------------------------------
+  // Keyboard shortcuts (never while typing in a field)
+  // ---------------------------------------------------------------------------
+  const handlersRef = useRef<{ reset: () => void; png: () => void; json: () => void; csv: () => void; play: () => void }>({
+    reset: () => {},
+    png: () => {},
+    json: () => {},
+    csv: () => {},
+    play: () => {},
+  });
   useEffect(() => {
-    const map = mapRef.current;
-    if (!map) return;
-
-    const setEmpty = () => {
-      map.setFilter(PIN_LAYERS.mmA, ["==", ["id"], -999999]);
-      map.setFilter(PIN_LAYERS.mmB, ["==", ["id"], -999999]);
-      map.setFilter(PIN_LAYERS.locA, ["==", ["get", "LocalityName"], "__nope__"]);
-      map.setFilter(PIN_LAYERS.locB, ["==", ["get", "LocalityName"], "__nope__"]);
-    };
-
-    if (!map.getLayer(PIN_LAYERS.mmA)) return;
-
-    setEmpty();
-
-    const applyOne = (p: PinnedSelection | null, which: "A" | "B") => {
-      if (!p) return;
-      if (p.level === "micromarkets") {
-        const fidNum = Number(p.featureId ?? p.joinKey);
-        map.setFilter(which === "A" ? PIN_LAYERS.mmA : PIN_LAYERS.mmB, ["==", ["id"], Number.isFinite(fidNum) ? fidNum : -999999]);
-      } else {
-        map.setFilter(which === "A" ? PIN_LAYERS.locA : PIN_LAYERS.locB, ["==", ["get", "LocalityName"], p.joinKey || "__nope__"]);
+    const onKeyDown = (ev: KeyboardEvent) => {
+      if (isEditableTarget(ev.target) || ev.metaKey || ev.ctrlKey || ev.altKey) return;
+      const k = ev.key.toLowerCase();
+      if (ev.key === "Escape") {
+        stopPlayback();
+        setPinA(null);
+        setPinB(null);
+        setClickInfo(null);
+      } else if (k === "r") handlersRef.current.reset();
+      else if (k === "p") handlersRef.current.png();
+      else if (k === "j") handlersRef.current.json();
+      else if (k === "c") handlersRef.current.csv();
+      else if (k === " ") {
+        ev.preventDefault();
+        handlersRef.current.play();
       }
     };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
 
-    applyOne(pinA, "A");
-    applyOne(pinB, "B");
-  }, [pinA, pinB]);
-
-  // -----------------------------
-  // Layer visibility toggles
-  // -----------------------------
-  useEffect(() => {
+  // ---------------------------------------------------------------------------
+  // Basemap config effects
+  // ---------------------------------------------------------------------------
+  const setConfig = (name: string, value: unknown) => {
     const map = mapRef.current;
-    if (!map) return;
-
-    setLayerVisibility(map, "localities-fill", showLocalities);
-    setLayerVisibility(map, "localities-outline", showLocalities);
-    setLayerVisibility(map, HIT_LAYERS.localities, showLocalities);
-    setLayerVisibility(map, PIN_LAYERS.locA, showLocalities);
-    setLayerVisibility(map, PIN_LAYERS.locB, showLocalities);
-
-    setLayerVisibility(map, "micromarkets-fill", showMicromarkets);
-    setLayerVisibility(map, "micromarkets-outline", showMicromarkets);
-    setLayerVisibility(map, HIT_LAYERS.micromarkets, showMicromarkets);
-    setLayerVisibility(map, PIN_LAYERS.mmA, showMicromarkets);
-    setLayerVisibility(map, PIN_LAYERS.mmB, showMicromarkets);
-
-    setLayerVisibility(map, "projects-circle", showProjects);
-    setLayerVisibility(map, HIT_LAYERS.projects, showProjects);
-
-    setLayerVisibility(map, "roads-line", showRoads);
-    setLayerVisibility(map, HIT_LAYERS.roads, showRoads);
-
-    setLayerVisibility(map, HIT_LAYERS.city, true);
-  }, [showLocalities, showMicromarkets, showProjects, showRoads]);
-
-  // Light preset runtime
-  useEffect(() => {
-    const map = mapRef.current;
-    if (!map) return;
+    if (!map || !mapReady) return;
     try {
-      map.setConfigProperty("basemap", "lightPreset", lightPreset);
+      map.setConfigProperty("basemap", name, value);
     } catch (e) {
-      console.warn("setConfigProperty failed (safe to ignore during init):", e);
+      console.warn(`setConfigProperty(${name}) failed:`, e);
     }
-  }, [lightPreset]);
+  };
 
-  // 2D/3D toggle (safe terrain)
+  useEffect(() => {
+    setConfig("lightPreset", lightPreset);
+    const map = mapRef.current;
+    if (map && mapReady) applyPresetColors(map, lightPreset);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lightPreset, mapReady, styleEpoch]);
+
+  useEffect(() => {
+    setConfig("theme", theme);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [theme, mapReady, styleEpoch]);
+
+  useEffect(() => {
+    setConfig("showPlaceLabels", showPlaceLabels);
+    setConfig("showRoadLabels", showRoadLabels);
+    setConfig("showPointOfInterestLabels", showPoiLabels);
+    setConfig("showTransitLabels", false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showPlaceLabels, showRoadLabels, showPoiLabels, mapReady, styleEpoch]);
+
+  // 3D: pitch/bearing + Standard 3D buildings
+  const applied3DRef = useRef(false);
   useEffect(() => {
     const map = mapRef.current;
-    if (!map) return;
+    if (!map || !mapReady) return;
+    setConfig("show3dObjects", enable3D);
+    // First run: keep a camera that came from the URL; otherwise snap to the 2D/3D default.
+    if (!applied3DRef.current) {
+      applied3DRef.current = true;
+      if (initialCamRef.current) return;
+      map.jumpTo({ pitch: enable3D ? DEFAULT_PITCH_3D : 0, bearing: enable3D ? DEFAULT_BEARING_3D : 0 });
+      return;
+    }
+    map.easeTo({ pitch: enable3D ? DEFAULT_PITCH_3D : 0, bearing: enable3D ? DEFAULT_BEARING_3D : 0, duration: 700 });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [enable3D, mapReady, styleEpoch]);
 
+  // Terrain (optional)
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapReady) return;
     let cancelled = false;
-
     const apply = () => {
       if (cancelled) return;
       if (!map.isStyleLoaded()) {
         map.once("idle", apply);
         return;
       }
-
-      if (enable3D) {
-        const demSourceId = "mapbox-dem";
-        if (!map.getSource(demSourceId)) {
+      if (terrain) {
+        if (!map.getSource(SRC.dem)) {
           try {
-            map.addSource(demSourceId, {
-              type: "raster-dem",
-              url: "mapbox://mapbox.mapbox-terrain-dem-v1",
-              tileSize: 512,
-              maxzoom: 14,
-            });
+            map.addSource(SRC.dem, { type: "raster-dem", url: "mapbox://mapbox.mapbox-terrain-dem-v1", tileSize: 512, maxzoom: 14 });
           } catch (e) {
             console.warn("DEM addSource failed:", e);
-            map.once("idle", apply);
             return;
           }
         }
-
         try {
-          map.setTerrain({ source: demSourceId, exaggeration: 1.3 });
+          map.setTerrain({ source: SRC.dem, exaggeration: 1.2 });
         } catch (e) {
           console.warn("setTerrain failed:", e);
         }
-
-        map.easeTo({ pitch: 60, bearing: -20, duration: 600 });
       } else {
         try {
           map.setTerrain(null);
         } catch {
           // ignore
         }
-        map.easeTo({ pitch: 0, bearing: 0, duration: 600 });
       }
     };
-
     apply();
     return () => {
       cancelled = true;
     };
-  }, [enable3D]);
+  }, [terrain, mapReady, styleEpoch]);
 
-  // Ensure correct polygon layer visible when choropleth enabled
+  // ---------------------------------------------------------------------------
+  // Layer toggles
+  // ---------------------------------------------------------------------------
   useEffect(() => {
-    if (!enableChoropleth) return;
-    if (choroplethLevel === "micromarkets") {
-      if (!showMicromarkets) setShowMicromarkets(true);
+    const map = mapRef.current;
+    if (!map || !mapReady) return;
+    setVisibility(map, LYR.projectsHeat, showHeat);
+    setVisibility(map, LYR.projectsCircle, showProjects);
+    setVisibility(map, LYR.hitProjects, showProjects);
+    setVisibility(map, LYR.roads, showRoads);
+    setVisibility(map, LYR.hitRoads, showRoads);
+    setVisibility(map, LYR.mmLabels, showLabels);
+    setVisibility(map, LYR.locLabels, showLabels);
+    // Layers that were hidden skipped preset recolouring; apply it now that they are visible.
+    applyPresetColors(map, lightPreset);
+    engineRef.current?.setOpacityLevel(showHeat ? 0.45 : CHOROPLETH_OPACITY);
+  }, [showHeat, showProjects, showRoads, showLabels, lightPreset, mapReady, styleEpoch]);
+
+  // ---------------------------------------------------------------------------
+  // Drill-down filters (focused micromarket -> its localities; focused locality -> its projects)
+  // ---------------------------------------------------------------------------
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapReady) return;
+
+    const locLayers = [LYR.locFillA, LYR.locFillB, LYR.locOutline, LYR.locHover, LYR.locExtrude];
+    const mmFocused = restrictLoc && focus.mmId !== null && locIdsByMm.size > 0;
+
+    if (mmFocused) {
+      const ids = locIdsByMm.get(focus.mmId!) ?? [];
+      const filter = FILTERS.idIn(ids);
+      for (const id of locLayers) setFilterSafe(map, id, filter);
+      setFilterSafe(map, LYR.locLabels, FILTERS.labelsLevelInMm("localities", focus.mmId!));
+      setFilterSafe(map, LYR.mmMask, FILTERS.notId(focus.mmId!));
     } else {
-      if (!showLocalities) setShowLocalities(true);
+      for (const id of locLayers) setFilterSafe(map, id, null);
+      setFilterSafe(map, LYR.locLabels, FILTERS.labelsLevel("localities"));
+      setFilterSafe(map, LYR.mmMask, FILTERS.noFeature);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [enableChoropleth, choroplethLevel]);
 
-  // -----------------------------
-  // Choropleth: compute legend + stops from data distribution for the selected month
-  // -----------------------------
-  const bucketRanges = useMemo(() => formatBucketRanges(legend.stops), [legend.stops]);
+    const projFocused = restrictProj && focus.locId !== null;
+    setFilterSafe(map, LYR.projectsCircle, projFocused ? FILTERS.projectsInLocality(focus.locId!) : null);
+  }, [focus, restrictLoc, restrictProj, locIdsByMm, mapReady, styleEpoch]);
 
+  // ---------------------------------------------------------------------------
+  // Pins
+  // ---------------------------------------------------------------------------
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapReady) return;
+    setFilterSafe(map, LYR.pinMmA, FILTERS.noFeature);
+    setFilterSafe(map, LYR.pinMmB, FILTERS.noFeature);
+    setFilterSafe(map, LYR.pinLocA, FILTERS.noName);
+    setFilterSafe(map, LYR.pinLocB, FILTERS.noName);
+    const apply = (p: PinnedSelection | null, which: "A" | "B") => {
+      if (!p) return;
+      if (p.level === "micromarkets") {
+        const id = toNumericId(p.featureId ?? p.joinKey);
+        if (id !== null) setFilterSafe(map, which === "A" ? LYR.pinMmA : LYR.pinMmB, FILTERS.byId(id));
+      } else {
+        setFilterSafe(map, which === "A" ? LYR.pinLocA : LYR.pinLocB, FILTERS.byName(p.joinKey || "__nope__"));
+      }
+    };
+    apply(pinA, "A");
+    apply(pinB, "B");
+  }, [pinA, pinB, mapReady, styleEpoch]);
+
+  // ---------------------------------------------------------------------------
+  // Choropleth: legend/stops
+  // ---------------------------------------------------------------------------
   useEffect(() => {
     if (!enableChoropleth || !activeDoc || !metricMonth) {
       setLegend({ stops: [], count: 0, missing: 0, min: null, max: null });
       return;
     }
-
-    const byMonth = activeDoc.byMonth?.[metricMonth];
-    if (!byMonth) {
-      setLegend({ stops: [], count: 0, missing: 0, min: null, max: null });
-      return;
-    }
-
-    const values: number[] = [];
-    let missing = 0;
-
-    for (const k of Object.keys(byMonth)) {
-      const v = byMonth[k]?.v;
-      if (typeof v === "number" && Number.isFinite(v)) values.push(v);
-      else missing += 1;
-    }
-
+    const months = scaleMode === "fixed" ? activeDoc.months ?? [] : [metricMonth];
+    const { values } = collectDocValues(activeDoc.byMonth, months);
+    const cur = collectDocValues(activeDoc.byMonth, [metricMonth]);
     values.sort((a, b) => a - b);
-    const min = values.length ? values[0]! : null;
-    const max = values.length ? values[values.length - 1]! : null;
-
-    const def = getMetricDef(metricKey);
-    const stops = computeQuantileStops(values, def.bucketCount);
-
     setLegend({
-      stops,
-      count: values.length,
-      missing,
-      min,
-      max,
+      stops: computeQuantileStops(values, def.bucketCount),
+      count: cur.values.length,
+      missing: cur.missing,
+      min: values.length ? values[0]! : null,
+      max: values.length ? values[values.length - 1]! : null,
     });
-  }, [enableChoropleth, activeDoc, metricMonth, metricKey]);
+  }, [enableChoropleth, activeDoc, metricMonth, def.bucketCount, scaleMode]);
 
-  // -----------------------------
-  // Choropleth: paint expression (data-driven stops)
-  // -----------------------------
+  // Paint (colour scale)
   useEffect(() => {
-    const map = mapRef.current;
-    if (!map) return;
+    const eng = engineRef.current;
+    if (!eng || !mapReady) return;
+    if (legend.stops.length < 2) return;
+    eng.setPaint({ stops: legend.stops, palette, missing: missingColorFor(lightPreset) }, null);
+  }, [legend.stops, palette, lightPreset, mapReady, styleEpoch]);
 
-    const isMm = choroplethLevel === "micromarkets";
-    const fillLayer = isMm ? "micromarkets-fill" : "localities-fill";
-    if (!map.getLayer(fillLayer)) return;
-
-    if (!enableChoropleth || legend.stops.length < 2) {
-      map.setPaintProperty(fillLayer, "fill-color", "#888888");
-      map.setPaintProperty(fillLayer, "fill-opacity", isMm ? 0.08 : 0.06);
+  // Render (values -> feature-state, cross-fade on month change)
+  useEffect(() => {
+    const eng = engineRef.current;
+    if (!eng || !mapReady) return;
+    if (!enableChoropleth) {
+      eng.hideAll();
       return;
     }
+    if (!activeDoc || !metricMonth) return; // keep current fills while this level's data loads
+    const durationMs = isPlayingRef.current ? Math.round(playStepMs * 0.8) : 350;
+    eng.render({ level: effectiveLevel, doc: activeDoc, month: metricMonth, durationMs });
+  }, [enableChoropleth, activeDoc, metricMonth, effectiveLevel, mapReady, playStepMs, styleEpoch]);
 
-    const valueExpr: ExpressionSpecification = ["coalesce", ["feature-state", "v"], -1];
-
-    const stops = legend.stops.slice();
-    const palette = UI.palette.slice(0, Math.max(1, stops.length - 1));
-
-    const stepExpr: ExpressionSpecification = ["step", valueExpr, palette[0]];
-    for (let i = 1; i < palette.length; i++) {
-      (stepExpr as unknown as unknown[]).push(stops[i], palette[i]);
-    }
-
-    map.setPaintProperty(fillLayer, "fill-color", ["case", ["<=", valueExpr, -1], UI.missing, stepExpr]);
-
-    map.setPaintProperty(fillLayer, "fill-opacity", ["case", ["<=", valueExpr, -1], 0.04, isMm ? 0.28 : 0.24]);
-  }, [enableChoropleth, choroplethLevel, legend.stops]);
-
-  // -----------------------------
-  // Choropleth: visible-only feature-state + cache (level, month, metric)
-  // -----------------------------
-  const stateCacheRef = useRef<Record<string, Set<string | number>>>({});
-  const lastApplyRef = useRef<{ cacheKey: string; lastZoom: number; lastCenter: string } | null>(null);
-
+  // 3D bars
   useEffect(() => {
-    const map = mapRef.current;
-    if (!map) return;
-    if (!enableChoropleth || !activeDoc || !metricMonth) return;
+    const eng = engineRef.current;
+    if (!eng || !mapReady) return;
+    eng.setExtrusion(extrude && enableChoropleth ? effectiveLevel : null);
+  }, [extrude, enableChoropleth, effectiveLevel, mapReady, styleEpoch]);
 
-    const isMm = choroplethLevel === "micromarkets";
-    const sourceId = isMm ? "micromarkets-src" : "localities-src";
-    const sourceLayer = isMm ? TILESETS.micromarkets.sourceLayer : TILESETS.localities.sourceLayer;
-    const fillLayer = isMm ? "micromarkets-fill" : "localities-fill";
-
-    if (!map.getSource(sourceId) || !map.getLayer(fillLayer)) return;
-
-    const byMonth = activeDoc.byMonth?.[metricMonth];
-    if (!byMonth) return;
-
-    const cacheKey = `${metricKey}|${choroplethLevel}|${metricMonth}`;
-    stateCacheRef.current[cacheKey] = stateCacheRef.current[cacheKey] || new Set<string | number>();
-    const applied = stateCacheRef.current[cacheKey]!;
-
-    const applyVisible = () => {
-      const center = map.getCenter();
-      const centerKey = `${center.lng.toFixed(5)},${center.lat.toFixed(5)}`;
-      const z = map.getZoom();
-
-      const last = lastApplyRef.current;
-      if (last && last.cacheKey === cacheKey && last.lastZoom === z && last.lastCenter === centerKey) {
-        return;
-      }
-      lastApplyRef.current = { cacheKey, lastZoom: z, lastCenter: centerKey };
-
-      const features = map.queryRenderedFeatures({ layers: [fillLayer] });
-      for (const f of features) {
-        const fid = toFeatureId(f.id);
-        if (fid === null) continue;
-        if (applied.has(fid)) continue;
-
-        let joinKey = "";
-        if (isMm) {
-          joinKey = String(fid);
-        } else {
-          const lname = (f.properties as Record<string, unknown> | undefined)?.LocalityName;
-          joinKey = typeof lname === "string" ? lname : "";
-        }
-
-        const bucket = joinKey ? byMonth[joinKey] : undefined;
-        const v = bucket?.v;
-
-        if (typeof v === "number" && Number.isFinite(v)) {
-          map.setFeatureState({ source: sourceId, sourceLayer, id: fid }, { v, n: bucket?.n ?? null });
-        } else {
-          map.setFeatureState({ source: sourceId, sourceLayer, id: fid }, { v: null, n: null });
-        }
-
-        applied.add(fid);
-      }
-    };
-
-    applyVisible();
-
-    const onMoveEnd = () => applyVisible();
-    const onZoomEnd = () => applyVisible();
-
-    map.on("moveend", onMoveEnd);
-    map.on("zoomend", onZoomEnd);
-
-    return () => {
-      map.off("moveend", onMoveEnd);
-      map.off("zoomend", onZoomEnd);
-    };
-  }, [enableChoropleth, activeDoc, metricMonth, choroplethLevel, metricKey]);
-
-  // -----------------------------
-  // Pinned series (A/B) from activeDoc
-  // -----------------------------
-  const seriesA = useMemo(() => {
-    if (!pinA || !activeDoc) return [];
-    const months = activeDoc.months ?? [];
-    return months.map((m) => {
-      const bucket = activeDoc.byMonth?.[m]?.[pinA.joinKey];
-      return {
-        month: m,
-        v: typeof bucket?.v === "number" ? bucket.v : null,
-        n: typeof bucket?.n === "number" ? bucket.n : null,
-      };
+  // ---------------------------------------------------------------------------
+  // Series / compare
+  // ---------------------------------------------------------------------------
+  const seriesFor = (pin: PinnedSelection | null) => {
+    if (!pin || !active) return [];
+    const doc = docsRef.current[metricKey]?.[pin.level] ?? (active.level === pin.level ? active.doc : null);
+    if (!doc) return [];
+    return (doc.months ?? []).map((m) => {
+      const b = doc.byMonth?.[m]?.[pin.joinKey];
+      return { month: m, v: typeof b?.v === "number" ? b.v : null, n: typeof b?.n === "number" ? b.n : null };
     });
-  }, [pinA, activeDoc]);
+  };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const seriesA = useMemo(() => seriesFor(pinA), [pinA, active, metricKey, docsVersion]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const seriesB = useMemo(() => seriesFor(pinB), [pinB, active, metricKey, docsVersion]);
 
-  const seriesB = useMemo(() => {
-    if (!pinB || !activeDoc) return [];
-    const months = activeDoc.months ?? [];
-    return months.map((m) => {
-      const bucket = activeDoc.byMonth?.[m]?.[pinB.joinKey];
-      return {
-        month: m,
-        v: typeof bucket?.v === "number" ? bucket.v : null,
-        n: typeof bucket?.n === "number" ? bucket.n : null,
-      };
-    });
-  }, [pinB, activeDoc]);
-
-  const currentA = useMemo(() => {
-    if (!pinA || !activeDoc || !metricMonth) return null;
-    return activeDoc.byMonth?.[metricMonth]?.[pinA.joinKey] ?? null;
-  }, [pinA, activeDoc, metricMonth]);
-
-  const currentB = useMemo(() => {
-    if (!pinB || !activeDoc || !metricMonth) return null;
-    return activeDoc.byMonth?.[metricMonth]?.[pinB.joinKey] ?? null;
-  }, [pinB, activeDoc, metricMonth]);
-
-  const deltaA = useMemo(() => {
-    if (!pinA || !metricMonth) return { abs: "-", pct: "-" };
-    const idx = seriesA.findIndex((r) => r.month === metricMonth);
+  const currentOf = (series: ReturnType<typeof seriesFor>) => series.find((r) => r.month === metricMonth) ?? null;
+  const currentA = currentOf(seriesA);
+  const currentB = currentOf(seriesB);
+  const deltaOf = (series: ReturnType<typeof seriesFor>) => {
+    const idx = series.findIndex((r) => r.month === metricMonth);
     if (idx <= 0) return { abs: "-", pct: "-" };
-    return formatDelta(seriesA[idx]?.v ?? null, seriesA[idx - 1]?.v ?? null);
-  }, [pinA, metricMonth, seriesA]);
+    return formatDelta(series[idx]?.v ?? null, series[idx - 1]?.v ?? null);
+  };
+  const deltaA = deltaOf(seriesA);
+  const deltaB = deltaOf(seriesB);
+  const sparkOf = (series: ReturnType<typeof seriesFor>) => {
+    const values = series.map((r) => r.v).filter((v): v is number => typeof v === "number");
+    const d = buildSparklinePath(values, 160, 44);
+    return { w: 160, h: 44, d, has: d.length > 0 };
+  };
+  const sparkA = sparkOf(seriesA);
+  const sparkB = sparkOf(seriesB);
 
-  const deltaB = useMemo(() => {
-    if (!pinB || !metricMonth) return { abs: "-", pct: "-" };
-    const idx = seriesB.findIndex((r) => r.month === metricMonth);
-    if (idx <= 0) return { abs: "-", pct: "-" };
-    return formatDelta(seriesB[idx]?.v ?? null, seriesB[idx - 1]?.v ?? null);
-  }, [pinB, metricMonth, seriesB]);
-
-  const sparkA = useMemo(() => {
-    const values = seriesA.map((r) => r.v).filter((v): v is number => typeof v === "number" && Number.isFinite(v));
-    const w = 160;
-    const h = 44;
-    const d = buildSparklinePath(values, w, h);
-    return { w, h, d, has: d.length > 0 };
-  }, [seriesA]);
-
-  const sparkB = useMemo(() => {
-    const values = seriesB.map((r) => r.v).filter((v): v is number => typeof v === "number" && Number.isFinite(v));
-    const w = 160;
-    const h = 44;
-    const d = buildSparklinePath(values, w, h);
-    return { w, h, d, has: d.length > 0 };
-  }, [seriesB]);
-
-  // -----------------------------
-  // Search results
-  // -----------------------------
+  // ---------------------------------------------------------------------------
+  // Search
+  // ---------------------------------------------------------------------------
   const searchResults = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     if (!q) return [];
@@ -1306,747 +1273,562 @@ export default function MapView() {
     return list.filter((x) => x.name.toLowerCase().includes(q)).slice(0, 12);
   }, [searchQuery, searchScope, dimLocalities, dimMicromarkets]);
 
-  async function jumpToByName(level: ChoroplethLevel, name: string) {
+  const jumpTo = (level: Level, item: DimItem) => {
     stopPlayback();
-
     const map = mapRef.current;
     if (!map) return;
 
-    if (level === "micromarkets") setShowMicromarkets(true);
-    else setShowLocalities(true);
-
-    setInspectTarget(level === "micromarkets" ? "micromarkets" : "localities");
-    setChoroplethLevel(level);
-
-    const srcId = level === "micromarkets" ? "micromarkets-src" : "localities-src";
-    const srcLayer = level === "micromarkets" ? TILESETS.micromarkets.sourceLayer : TILESETS.localities.sourceLayer;
-
-    const tryFind = () => {
-      const nameProps = level === "micromarkets" ? ["MicroMarketName", "MicromarketName", "Micromarket"] : ["LocalityName"];
-      for (const prop of nameProps) {
-        try {
-          const feats = map.querySourceFeatures(srcId, {
-            sourceLayer: srcLayer,
-            filter: ["==", ["get", prop], name] as FilterSpecification,
-          });
-
-          if (feats && feats.length) {
-            const f = feats[0] as unknown as MapboxGeoJSONFeature;
-            const fid = toFeatureId(f.id);
-            const props = (f.properties ?? {}) as Record<string, unknown>;
-
-            if (level === "micromarkets" && fid !== null) {
-              const display =
-                getStrProp(props, "MicroMarketName") ||
-                getStrProp(props, "MicromarketName") ||
-                getStrProp(props, "Micromarket") ||
-                name;
-
-              setPinA({ level: "micromarkets", joinKey: String(fid), displayName: display, featureId: fid });
-              fitToFeature(map, f);
-              return true;
-            }
-
-            if (level === "localities") {
-              setPinA({ level: "localities", joinKey: name, displayName: name, featureId: fid ?? null });
-              fitToFeature(map, f);
-              return true;
-            }
-          }
-        } catch {
-          // ignore
-        }
-      }
-      return false;
+    const pin: PinnedSelection = {
+      level,
+      joinKey: level === "micromarkets" ? String(item.id) : item.name,
+      displayName: item.name,
+      featureId: item.id,
     };
+    setPinA(pin);
 
-    if (tryFind()) return;
+    const tryFit = (): boolean => {
+      const entry = indexRef.current.get(level, item.id) ?? indexRef.current.findByName(level, item.name);
+      if (!entry) return false;
+      map.fitBounds(bboxToBounds(entry.bbox), level === "micromarkets" ? FIT_MM : FIT_LOC);
+      return true;
+    };
+    if (tryFit()) return;
 
-    map.easeTo({ center: DEFAULT_CENTER as unknown as LngLatLike, zoom: Math.max(map.getZoom(), 11.5), duration: 450 });
+    // Not indexed yet: zoom out to the city so every polygon tile loads, then retry.
+    map.fitBounds(CITY_BOUNDS, { padding: 40, duration: 600, maxZoom: 11 });
     map.once("idle", () => {
-      tryFind();
+      indexRef.current.scan(map, "localities", SRC.localities, TILESETS.localities.sourceLayer, "LocalityName", (id) => locById.get(id)?.micromarketId ?? null);
+      indexRef.current.scan(map, "micromarkets", SRC.micromarkets, TILESETS.micromarkets.sourceLayer, "MicroMarketName");
+      if (!tryFit()) console.warn("Could not locate polygon for", level, item.name);
     });
-  }
+  };
 
-  const def = useMemo(() => getMetricDef(metricKey), [metricKey]);
+  // ---------------------------------------------------------------------------
+  // Camera / exports
+  // ---------------------------------------------------------------------------
+  const resetView = () => {
+    stopPlayback();
+    const map = mapRef.current;
+    if (!map) return;
+    map.flyTo({
+      center: DEFAULT_CENTER as unknown as LngLatLike,
+      zoom: DEFAULT_ZOOM,
+      pitch: enable3D ? DEFAULT_PITCH_3D : 0,
+      bearing: enable3D ? DEFAULT_BEARING_3D : 0,
+      duration: 1200,
+      essential: true,
+    });
+  };
+  const zoomOutToMicromarket = () => {
+    const map = mapRef.current;
+    if (!map || focus.mmId === null) return;
+    const entry = indexRef.current.get("micromarkets", focus.mmId);
+    if (entry) map.fitBounds(bboxToBounds(entry.bbox), FIT_MM);
+    else resetView();
+  };
+
+  const exportBaseName = () => `map_${metricKey}_${effectiveLevel}_${metricMonth ? metricMonth.replaceAll("-", "") : "nomonth"}_${isoCompactNow()}`;
+
+  const handleExportPng = () => {
+    const map = mapRef.current;
+    if (!map) return;
+    try {
+      const a = document.createElement("a");
+      a.href = map.getCanvas().toDataURL("image/png");
+      a.download = `${exportBaseName()}.png`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    } catch (e) {
+      console.error("PNG export failed:", e);
+      alert("PNG export failed (tainted canvas?). See console.");
+    }
+  };
+  const handleExportStateJson = () => {
+    const map = mapRef.current;
+    const state = {
+      metricKey,
+      levelMode,
+      effectiveLevel,
+      metricMonth,
+      scaleMode,
+      lightPreset,
+      theme,
+      enable3D,
+      terrain,
+      enableChoropleth,
+      showHeat,
+      showProjects,
+      showRoads,
+      showLabels,
+      extrude,
+      restrictLoc,
+      restrictProj,
+      focus,
+      pinA,
+      pinB,
+      camera: map ? { center: map.getCenter().toArray(), zoom: map.getZoom(), pitch: map.getPitch(), bearing: map.getBearing() } : null,
+      exportedAt: new Date().toISOString(),
+    };
+    downloadText(JSON.stringify(state, null, 2), `${exportBaseName()}_state.json`, "application/json");
+  };
+  const handleExportCsv = () => {
+    if (!pinA && !pinB) return;
+    const rows: Array<Record<string, unknown>> = [];
+    const push = (label: string, pin: PinnedSelection | null, series: ReturnType<typeof seriesFor>) => {
+      if (!pin) return;
+      for (const r of series) rows.push({ pin: label, level: pin.level, name: pin.displayName, metric: metricKey, month: r.month, value: r.v, n: r.n });
+    };
+    push("A", pinA, seriesA);
+    push("B", pinB, seriesB);
+    downloadText(toCsv(rows, ["pin", "level", "name", "metric", "month", "value", "n"]), `${exportBaseName()}_pinned.csv`, "text/csv;charset=utf-8");
+  };
+  const togglePlay = () => {
+    if (!enableChoropleth || monthOptions.length < 2) return;
+    setIsPlaying((p) => !p);
+  };
+  useEffect(() => {
+    handlersRef.current = { reset: resetView, png: handleExportPng, json: handleExportStateJson, csv: handleExportCsv, play: togglePlay };
+  });
+
+  const copyShareUrl = async () => {
+    try {
+      await navigator.clipboard.writeText(window.location.href);
+    } catch {
+      // ignore
+    }
+  };
+
+  // ---------------------------------------------------------------------------
+  // UI bits
+  // ---------------------------------------------------------------------------
+  const selectStyle: React.CSSProperties = {
+    width: "100%",
+    padding: 8,
+    borderRadius: 8,
+    border: `1px solid ${UI.controlBorder}`,
+    background: UI.controlBg,
+    color: UI.controlText,
+    fontSize: 12,
+  };
+  const btnStyle = (primary = false, disabled = false): React.CSSProperties => ({
+    fontSize: 12,
+    padding: "8px 10px",
+    border: primary ? "1px solid transparent" : `1px solid ${UI.controlBorder}`,
+    borderRadius: 8,
+    background: primary ? UI.primaryBg : UI.controlBg,
+    color: primary ? UI.primaryText : UI.controlText,
+    cursor: disabled ? "not-allowed" : "pointer",
+    opacity: disabled ? 0.55 : 1,
+  });
+  const bandLabel = band === "micromarkets" ? "Micromarkets" : band === "localities" ? "Localities" : "Projects";
+  const playDisabled = !enableChoropleth || monthOptions.length < 2;
 
   return (
     <div style={{ display: "grid", gridTemplateColumns: "1fr 420px", height: "100vh" }}>
-      <div ref={containerRef} style={{ width: "100%", height: "100%" }} />
+      <div style={{ position: "relative" }}>
+        <div ref={containerRef} style={{ position: "absolute", inset: 0 }} />
 
-      <div
-        style={{
-          borderLeft: `1px solid ${UI.panelBorder}`,
-          padding: 12,
-          overflow: "auto",
-          background: UI.panelBg,
-          color: UI.panelText,
-        }}
-      >
-        <h3 style={{ margin: "0 0 8px 0" }}>Inspector</h3>
-
-        {/* Export controls */}
+        {/* Breadcrumb overlay */}
         <div
           style={{
-            marginBottom: 12,
-            padding: 10,
-            border: `1px solid ${UI.panelBorder}`,
+            position: "absolute",
+            top: 10,
+            left: 10,
+            display: "flex",
+            gap: 6,
+            alignItems: "center",
+            padding: "6px 10px",
             borderRadius: 8,
-            background: "rgba(255,255,255,0.03)",
+            background: "rgba(11,15,25,0.82)",
+            color: UI.panelText,
+            fontSize: 12,
+            border: `1px solid ${UI.panelBorder}`,
+            pointerEvents: "auto",
           }}
         >
-          <div style={{ fontWeight: 600, marginBottom: 8 }}>Exports</div>
-
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-            <button
-              onClick={handleExportPng}
-              disabled={!mapReady}
-              style={{
-                fontSize: 12,
-                padding: "10px 10px",
-                border: `1px solid ${UI.controlBorder}`,
-                borderRadius: 8,
-                background: UI.controlBg,
-                color: UI.controlText,
-                cursor: mapReady ? "pointer" : "not-allowed",
-                opacity: mapReady ? 1 : 0.55,
-              }}
-              title={mapReady ? "Export current map canvas as PNG (P)" : "Map not ready yet"}
-            >
-              Export PNG (P)
-            </button>
-
-            <button
-              onClick={handleExportStateJson}
-              style={{
-                fontSize: 12,
-                padding: "10px 10px",
-                border: `1px solid ${UI.controlBorder}`,
-                borderRadius: 8,
-                background: UI.controlBg,
-                color: UI.controlText,
-                cursor: "pointer",
-              }}
-              title="Export current inspector state as JSON (J)"
-            >
-              Export State JSON (J)
-            </button>
-          </div>
-
-          <div style={{ marginTop: 8, fontSize: 12, color: UI.mutedText }}>
-            Notes: PNG export requires <code>preserveDrawingBuffer</code>. If you later add external images/icons without CORS, export may fail due to a tainted canvas.
-          </div>
+          <button onClick={resetView} style={{ ...btnStyle(false), padding: "3px 8px" }} title="Back to city (R)">
+            Mumbai
+          </button>
+          {focus.mmId !== null ? (
+            <>
+              <span style={{ color: UI.mutedText }}>›</span>
+              <button onClick={zoomOutToMicromarket} style={{ ...btnStyle(false), padding: "3px 8px" }} title="Fit this micromarket">
+                {focus.mmName}
+              </button>
+            </>
+          ) : null}
+          {focus.locId !== null ? (
+            <>
+              <span style={{ color: UI.mutedText }}>›</span>
+              <span style={{ fontWeight: 600 }}>{focus.locName}</span>
+            </>
+          ) : null}
+          <span style={{ marginLeft: 8, color: UI.mutedText }}>
+            z{zoomDisplay.toFixed(1)} · {bandLabel}
+          </span>
         </div>
 
-        {/* v2.3 Controls */}
-        <div
-          style={{
-            marginBottom: 12,
-            padding: 10,
-            border: `1px solid ${UI.panelBorder}`,
-            borderRadius: 8,
-            background: "rgba(255,255,255,0.03)",
-          }}
-        >
-          <div style={{ fontWeight: 600, marginBottom: 8 }}>v2.3 Dynamic Metrics</div>
-
-          <label style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 10 }}>
-            <input
-              type="checkbox"
-              checked={enableChoropleth}
-              onChange={(e) => {
-                stopPlayback();
-                setEnableChoropleth(e.target.checked);
-              }}
-            />
-            Enable choropleth
-          </label>
-
-          <div style={{ display: "grid", gap: 10 }}>
-            <div>
-              <div style={{ fontSize: 12, opacity: 0.9, marginBottom: 4 }}>Metric</div>
-              <select
-                value={metricKey}
-                onChange={(e) => {
-                  stopPlayback();
-                  setMetricKey(e.target.value);
-                }}
-                style={{
-                  width: "100%",
-                  padding: 8,
-                  borderRadius: 8,
-                  border: `1px solid ${UI.controlBorder}`,
-                  background: UI.controlBg,
-                  color: UI.controlText,
-                }}
-                disabled={!enableChoropleth}
-              >
-                {METRICS.map((m) => (
-                  <option key={m.key} value={m.key}>
-                    {m.label}
-                  </option>
+        {/* Floating legend */}
+        {enableChoropleth && bucketRanges.length ? (
+          <div
+            style={{
+              position: "absolute",
+              bottom: 28,
+              right: 10,
+              padding: "8px 10px",
+              borderRadius: 8,
+              background: "rgba(11,15,25,0.82)",
+              color: UI.panelText,
+              fontSize: 11,
+              border: `1px solid ${UI.panelBorder}`,
+              minWidth: 150,
+            }}
+          >
+            <div style={{ fontWeight: 600, marginBottom: 4 }}>
+              {def.label} · {effectiveLevel === "micromarkets" ? "Micromarkets" : "Localities"}
+            </div>
+            <div style={{ color: UI.mutedText, marginBottom: 6 }}>{metricMonth ? parseMonthLabel(metricMonth) : "-"}</div>
+            {bucketRanges.map((r, i) => {
+              const lo = Math.round(r[0]);
+              const hi = Math.round(r[1]);
+              const label = i === bucketRanges.length - 1 ? `${fmtMoney(lo)}+` : `${fmtMoney(lo)} – ${fmtMoney(hi)}`;
+              return (
+                <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 2 }}>
+                  <div style={{ width: 18, height: 10, background: palette[i] ?? palette[palette.length - 1], borderRadius: 3 }} />
+                  <div>{label}</div>
+                </div>
+              );
+            })}
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 4 }}>
+              <div style={{ width: 18, height: 10, background: missingColorFor(lightPreset), borderRadius: 3, border: `1px solid ${UI.panelBorder}` }} />
+              <div style={{ color: UI.mutedText }}>No data</div>
+            </div>
+            {showProjects && band === "projects" ? (
+              <div style={{ marginTop: 8, paddingTop: 6, borderTop: `1px solid ${UI.panelBorder}` }}>
+                {STATUS_GROUPS.map((s) => (
+                  <div key={s.key} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 2 }}>
+                    <div style={{ width: 9, height: 9, borderRadius: 99, background: s.color }} />
+                    <div>{s.label}</div>
+                  </div>
                 ))}
-              </select>
-            </div>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
 
-            <div>
-              <div style={{ fontSize: 12, opacity: 0.9, marginBottom: 4 }}>Level</div>
-              <select
-                value={choroplethLevel}
-                onChange={(e) => {
-                  stopPlayback();
-                  const lvl = e.target.value as ChoroplethLevelCfg;
-                  setChoroplethLevel(lvl);
-                }}
-                style={{
-                  width: "100%",
-                  padding: 8,
-                  borderRadius: 8,
-                  border: `1px solid ${UI.controlBorder}`,
-                  background: UI.controlBg,
-                  color: UI.controlText,
-                }}
-                disabled={!enableChoropleth}
-              >
-                <option value="micromarkets">Micromarkets (join via featureId)</option>
-                <option value="localities">Localities (join via LocalityName)</option>
-              </select>
-            </div>
+      {/* ------------------------------------------------------------------ */}
+      {/* Right panel                                                          */}
+      {/* ------------------------------------------------------------------ */}
+      <div style={{ borderLeft: `1px solid ${UI.panelBorder}`, padding: 12, overflow: "auto", background: UI.panelBg, color: UI.panelText }}>
+        <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 8 }}>
+          <h3 style={{ margin: 0 }}>Mumbai map analytics</h3>
+          <span style={{ fontSize: 11, color: UI.mutedText }}>{mapReady ? "map ready" : "loading…"}</span>
+        </div>
 
-            <div>
-              <div style={{ fontSize: 12, opacity: 0.9, marginBottom: 4 }}>Month</div>
-              <select
-                value={metricMonth}
-                onChange={(e) => {
-                  stopPlayback();
-                  setMetricMonth(e.target.value);
-                }}
-                style={{
-                  width: "100%",
-                  padding: 8,
-                  borderRadius: 8,
-                  border: `1px solid ${UI.controlBorder}`,
-                  background: UI.controlBg,
-                  color: UI.controlText,
-                }}
-                disabled={!enableChoropleth || monthOptions.length === 0}
-              >
-                {monthOptions.length === 0 ? (
-                  <option value="">Loading…</option>
-                ) : (
-                  monthOptions.map((m) => (
-                    <option key={m} value={m}>
-                      {parseMonthLabel(m)}
+        {/* Drill-down */}
+        <Section title="Drill-down">
+          <div style={{ fontSize: 12, color: UI.mutedText, marginBottom: 8, lineHeight: 1.5 }}>
+            Zoom drives the level: <b style={{ color: UI.panelText }}>micromarkets</b> below z{Z_LOC}, <b style={{ color: UI.panelText }}>localities</b> from z{Z_LOC}, <b style={{ color: UI.panelText }}>project dots</b> from z{Z_PROJ}. Click a polygon to zoom into it.
+          </div>
+          <Check label="Only show localities of the focused micromarket" checked={restrictLoc} onChange={setRestrictLoc} />
+          <Check label="Only show projects of the focused locality" checked={restrictProj} onChange={setRestrictProj} />
+          <div style={{ fontSize: 12, marginTop: 6 }}>
+            Focus: <b>{focus.mmName || "—"}</b>
+            {focus.locName ? (
+              <>
+                {" "}
+                › <b>{focus.locName}</b>
+                <span style={{ color: UI.mutedText }}> · {projectsInView} projects in view</span>
+              </>
+            ) : null}
+          </div>
+        </Section>
+
+        {/* Layers */}
+        <Section title="Layers">
+          <Check label="Choropleth (metric fills)" checked={enableChoropleth} onChange={(v) => { stopPlayback(); setEnableChoropleth(v); }} />
+          <Check label="Heatmap: project concentration" checked={showHeat} onChange={setShowHeat} hint="Kernel-density heat of all project points" />
+          <Check label={`Project dots (from z${Z_PROJ})`} checked={showProjects} onChange={setShowProjects} />
+          <Check label="3D bars (extrude polygons by value)" checked={extrude} onChange={setExtrude} disabled={!enableChoropleth} />
+          <Check label="Area name labels" checked={showLabels} onChange={setShowLabels} />
+          <Check label="Roads tileset" checked={showRoads} onChange={setShowRoads} />
+        </Section>
+
+        {/* Metric + timeline */}
+        <Section title="Metric & timeline">
+          <div style={{ display: "grid", gap: 10 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+              <div>
+                <Label>Metric</Label>
+                <select value={metricKey} onChange={(e) => { stopPlayback(); setMetricKey(e.target.value); }} style={selectStyle} disabled={!enableChoropleth}>
+                  {METRICS.map((m) => (
+                    <option key={m.key} value={m.key}>
+                      {m.label}
                     </option>
-                  ))
-                )}
-              </select>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <Label>Level</Label>
+                <select value={levelMode} onChange={(e) => { stopPlayback(); setLevelMode(e.target.value as LevelMode); }} style={selectStyle} disabled={!enableChoropleth}>
+                  <option value="auto">Auto (by zoom) · {effectiveLevel}</option>
+                  <option value="micromarkets">Micromarkets</option>
+                  <option value="localities">Localities</option>
+                </select>
+              </div>
             </div>
 
-            {/* Timeline slider + Play */}
-            <div
-              style={{
-                padding: 10,
-                border: `1px solid ${UI.panelBorder}`,
-                borderRadius: 8,
-                background: "rgba(255,255,255,0.03)",
-              }}
-            >
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+              <div>
+                <Label>Month</Label>
+                <select value={metricMonth} onChange={(e) => { stopPlayback(); setMetricMonth(e.target.value); }} style={selectStyle} disabled={!enableChoropleth || monthOptions.length === 0}>
+                  {monthOptions.length === 0 ? (
+                    <option value="">Loading…</option>
+                  ) : (
+                    monthOptions.map((m) => (
+                      <option key={m} value={m}>
+                        {parseMonthLabel(m)}
+                      </option>
+                    ))
+                  )}
+                </select>
+              </div>
+              <div>
+                <Label>Colour scale</Label>
+                <select value={scaleMode} onChange={(e) => setScaleMode(e.target.value as ScaleMode)} style={selectStyle} disabled={!enableChoropleth} title="Fixed keeps the same colour ↔ value mapping across months so playback is comparable">
+                  <option value="fixed">Fixed across months</option>
+                  <option value="month">Re-bucket each month</option>
+                </select>
+              </div>
+            </div>
+
+            <div style={{ padding: 10, border: `1px solid ${UI.panelBorder}`, borderRadius: 8, background: "rgba(255,255,255,0.03)" }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
                 <div style={{ fontSize: 12, opacity: 0.9 }}>Timeline</div>
                 <div style={{ fontSize: 12, fontWeight: 600 }}>{metricMonth ? parseMonthLabel(metricMonth) : "-"}</div>
               </div>
-
-              <div style={{ marginTop: 8 }}>
-                <input
-                  type="range"
-                  min={0}
-                  max={Math.max(0, monthOptions.length - 1)}
-                  step={1}
-                  value={metricMonthIndex}
-                  onChange={(e) => {
-                    stopPlayback();
-                    const idx = Number(e.target.value);
-                    const next = monthOptions[idx];
-                    if (next) setMetricMonth(next);
-                  }}
-                  disabled={!enableChoropleth || monthOptions.length === 0}
-                  style={{ width: "100%" }}
-                />
-              </div>
-
-              <div style={{ marginTop: 10, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-                <button
-                  onClick={() => {
-                    if (!enableChoropleth) return;
-                    if (!monthOptions.length) return;
-                    setIsPlaying((p) => !p);
-                  }}
-                  disabled={!enableChoropleth || monthOptions.length < 2}
-                  style={{
-                    fontSize: 12,
-                    padding: "8px 10px",
-                    border: "1px solid transparent",
-                    borderRadius: 8,
-                    background: UI.primaryBg,
-                    color: UI.primaryText,
-                    cursor: !enableChoropleth || monthOptions.length < 2 ? "not-allowed" : "pointer",
-                    opacity: !enableChoropleth || monthOptions.length < 2 ? 0.55 : 1,
-                  }}
-                  title={monthOptions.length < 2 ? "Not enough months to play" : isPlaying ? "Pause" : "Play"}
-                >
+              <input
+                type="range"
+                min={0}
+                max={Math.max(0, monthOptions.length - 1)}
+                step={1}
+                value={metricMonthIndex}
+                onChange={(e) => {
+                  stopPlayback();
+                  const next = monthOptions[Number(e.target.value)];
+                  if (next) setMetricMonth(next);
+                }}
+                disabled={!enableChoropleth || monthOptions.length === 0}
+                style={{ width: "100%", marginTop: 8 }}
+              />
+              <div style={{ marginTop: 10, display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
+                <button onClick={togglePlay} disabled={playDisabled} style={btnStyle(true, playDisabled)} title="Space">
                   {isPlaying ? "Pause" : "Play"}
                 </button>
-
-                <select
-                  value={playSpeed}
-                  onChange={(e) => {
-                    stopPlayback();
-                    setPlaySpeed(e.target.value as PlaySpeed);
-                  }}
-                  disabled={!enableChoropleth || monthOptions.length < 2}
-                  style={{
-                    width: "100%",
-                    padding: 8,
-                    fontSize: 12,
-                    borderRadius: 8,
-                    border: `1px solid ${UI.controlBorder}`,
-                    background: UI.controlBg,
-                    color: UI.controlText,
-                  }}
-                  title="Playback speed"
-                >
-                  <option value="slow">Speed: Slow</option>
-                  <option value="normal">Speed: Normal</option>
-                  <option value="fast">Speed: Fast</option>
+                <select value={playSpeed} onChange={(e) => setPlaySpeed(e.target.value as PlaySpeed)} disabled={playDisabled} style={selectStyle}>
+                  <option value="slow">Slow</option>
+                  <option value="normal">Normal</option>
+                  <option value="fast">Fast</option>
                 </select>
+                <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12 }}>
+                  <input type="checkbox" checked={loopPlay} onChange={(e) => setLoopPlay(e.target.checked)} disabled={playDisabled} />
+                  Loop
+                </label>
               </div>
-
-              <label style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 10, fontSize: 12 }}>
-                <input type="checkbox" checked={loopPlay} onChange={(e) => setLoopPlay(e.target.checked)} disabled={!enableChoropleth || monthOptions.length < 2} />
-                Loop playback
-              </label>
-
-              <div style={{ marginTop: 8, fontSize: 12, color: UI.mutedText }}>
-                Playback stops on map interaction (drag/zoom/click) or manual month change.
+              <div style={{ marginTop: 8, fontSize: 11, color: UI.mutedText }}>
+                Months cross-fade on the GPU. Playback pauses when you drag or zoom.
               </div>
             </div>
 
-            {/* Legend */}
-            <div style={{ marginTop: 2, fontSize: 12, opacity: 0.95 }}>
-              <div style={{ fontWeight: 600, marginBottom: 6 }}>Legend (quantiles)</div>
-
-              <div style={{ display: "grid", gap: 4 }}>
-                <div>
-                  Metric: <span style={{ fontWeight: 600 }}>{def.label}</span>
-                </div>
-                <div>
-                  Month: <span style={{ fontWeight: 600 }}>{metricMonth ? parseMonthLabel(metricMonth) : "-"}</span>
-                </div>
-                <div>
-                  Range: <span style={{ fontWeight: 600 }}>{legend.min === null ? "-" : fmtMoney(legend.min)}</span> to{" "}
-                  <span style={{ fontWeight: 600 }}>{legend.max === null ? "-" : fmtMoney(legend.max)}</span>
-                </div>
-                <div>
-                  Data: <span style={{ fontWeight: 600 }}>{legend.count}</span> points, <span style={{ fontWeight: 600 }}>{legend.missing}</span> missing
-                </div>
-              </div>
-
-              <div style={{ marginTop: 8, display: "grid", gap: 6 }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <div
-                    style={{
-                      width: 18,
-                      height: 10,
-                      background: UI.missing,
-                      borderRadius: 3,
-                      border: "1px solid rgba(255,255,255,0.12)",
-                    }}
-                  />
-                  <div style={{ fontSize: 12, opacity: 0.95 }}>Missing</div>
-                </div>
-
-                {bucketRanges.length ? (
-                  bucketRanges.map((r, i) => {
-                    const color = UI.palette[i] ?? UI.palette[UI.palette.length - 1];
-                    const lo = Math.round(r[0]);
-                    const hi = Math.round(r[1]);
-                    const label = i === bucketRanges.length - 1 ? `${fmtMoney(lo)}+` : `${fmtMoney(lo)} – ${fmtMoney(hi)}`;
-                    return (
-                      <div key={i} style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                        <div
-                          style={{
-                            width: 18,
-                            height: 10,
-                            background: color,
-                            borderRadius: 3,
-                            border: "1px solid rgba(255,255,255,0.12)",
-                          }}
-                        />
-                        <div style={{ fontSize: 12, opacity: 0.95 }}>{label}</div>
-                      </div>
-                    );
-                  })
-                ) : (
-                  <div style={{ fontSize: 12, color: UI.mutedText }}>Legend will appear once data is loaded.</div>
-                )}
-              </div>
-            </div>
-
-            {/* Search & jump */}
-            <div style={{ marginTop: 10, paddingTop: 10, borderTop: `1px solid ${UI.panelBorder}` }}>
-              <div style={{ fontWeight: 600, marginBottom: 6 }}>Search & jump</div>
-
-              <div style={{ display: "grid", gridTemplateColumns: "140px 1fr", gap: 8, marginBottom: 8 }}>
-                <select
-                  value={searchScope}
-                  onChange={(e) => setSearchScope(e.target.value as ChoroplethLevel)}
-                  style={{
-                    width: "100%",
-                    padding: 8,
-                    borderRadius: 8,
-                    border: `1px solid ${UI.controlBorder}`,
-                    background: UI.controlBg,
-                    color: UI.controlText,
-                    fontSize: 12,
-                  }}
-                  title="Search scope"
-                >
-                  <option value="localities">Localities</option>
-                  <option value="micromarkets">Micromarkets</option>
-                </select>
-
-                <input
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  placeholder="Type a name (e.g., Andheri, Powai, …)"
-                  style={{
-                    width: "100%",
-                    padding: 8,
-                    borderRadius: 8,
-                    border: `1px solid ${UI.controlBorder}`,
-                    background: UI.controlBg,
-                    color: UI.controlText,
-                    fontSize: 12,
-                  }}
-                />
-              </div>
-
-              {searchResults.length ? (
-                <div style={{ border: `1px solid ${UI.panelBorder}`, borderRadius: 8, overflow: "hidden" }}>
-                  {searchResults.map((r) => (
-                    <button
-                      key={`${searchScope}-${r.id}`}
-                      onClick={() => jumpToByName(searchScope, r.name)}
-                      style={{
-                        width: "100%",
-                        textAlign: "left",
-                        padding: "8px 10px",
-                        border: "none",
-                        borderBottom: `1px solid ${UI.panelBorder}`,
-                        background: "rgba(255,255,255,0.03)",
-                        color: UI.panelText,
-                        cursor: "pointer",
-                        fontSize: 12,
-                      }}
-                      title="Jump to this geometry (pins A)"
-                    >
-                      {r.name}
-                      {r.pincode ? <span style={{ marginLeft: 8, color: UI.mutedText }}>({r.pincode})</span> : null}
-                    </button>
-                  ))}
-                </div>
-              ) : (
-                <div style={{ fontSize: 12, color: UI.mutedText }}>
-                  Tip: run <code>scripts/build_dims_public.py</code> if search list is empty.
-                </div>
-              )}
-
-              <div style={{ marginTop: 8, fontSize: 12, color: UI.mutedText }}>
-                Click pins A. <span style={{ fontWeight: 600, color: UI.panelText }}>Shift+Click</span> pins B (compare).
-              </div>
-            </div>
-
-            {/* Compare: A/B */}
-            <div style={{ marginTop: 10, paddingTop: 10, borderTop: `1px solid ${UI.panelBorder}` }}>
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-                <div style={{ fontWeight: 600 }}>Pinned compare</div>
-                <button
-                  onClick={() => {
-                    stopPlayback();
-                    setPinA(null);
-                    setPinB(null);
-                  }}
-                  style={{
-                    fontSize: 12,
-                    padding: "6px 8px",
-                    border: `1px solid ${UI.controlBorder}`,
-                    borderRadius: 6,
-                    background: UI.controlBg,
-                    color: UI.controlText,
-                    cursor: pinA || pinB ? "pointer" : "not-allowed",
-                    opacity: pinA || pinB ? 1 : 0.55,
-                  }}
-                  disabled={!pinA && !pinB}
-                  title="Clear pins"
-                >
-                  Clear
-                </button>
-              </div>
-
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 10 }}>
-                {/* A */}
-                <div style={{ border: `1px solid ${UI.panelBorder}`, borderRadius: 8, padding: 10, background: "rgba(255,255,255,0.03)" }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                    <div style={{ width: 10, height: 10, borderRadius: 999, background: UI.pinA }} />
-                    <div style={{ fontWeight: 600, fontSize: 12 }}>A</div>
-                  </div>
-
-                  {!pinA ? (
-                    <div style={{ marginTop: 8, fontSize: 12, color: UI.mutedText }}>Click a micromarket/locality to pin A.</div>
-                  ) : (
-                    <div style={{ marginTop: 8, fontSize: 12, display: "grid", gap: 6 }}>
-                      <div style={{ fontWeight: 600 }}>{pinA.displayName}</div>
-                      <div>
-                        Value: <span style={{ fontWeight: 600 }}>{typeof currentA?.v === "number" ? fmtMoney(currentA.v) : "-"}</span>{" "}
-                        <span style={{ color: UI.mutedText }}>(n: {typeof currentA?.n === "number" ? currentA.n : "-"})</span>
-                      </div>
-                      <div>
-                        Δ vs prev: <span style={{ fontWeight: 600 }}>{deltaA.abs}</span> <span style={{ color: UI.mutedText }}>({deltaA.pct})</span>
-                      </div>
-
-                      <div
-                        style={{
-                          width: sparkA.w,
-                          height: sparkA.h,
-                          border: `1px solid ${UI.controlBorder}`,
-                          borderRadius: 8,
-                          background: UI.controlBg,
-                          overflow: "hidden",
-                        }}
-                        title="A time-series sparkline"
-                      >
-                        <svg width={sparkA.w} height={sparkA.h}>
-                          <line x1="2" y1={sparkA.h - 6} x2={sparkA.w - 2} y2={sparkA.h - 6} stroke={UI.controlBorder} strokeWidth={1} />
-                          {sparkA.has ? (
-                            <path d={sparkA.d} fill="none" stroke={UI.pinA} strokeWidth={2} />
-                          ) : (
-                            <text x="10" y="26" fontSize="12" fill={UI.controlText} opacity={0.6}>
-                              Not enough data
-                            </text>
-                          )}
-                        </svg>
-                      </div>
-                    </div>
-                  )}
-                </div>
-
-                {/* B */}
-                <div style={{ border: `1px solid ${UI.panelBorder}`, borderRadius: 8, padding: 10, background: "rgba(255,255,255,0.03)" }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                    <div style={{ width: 10, height: 10, borderRadius: 999, background: UI.pinB }} />
-                    <div style={{ fontWeight: 600, fontSize: 12 }}>B</div>
-                  </div>
-
-                  {!pinB ? (
-                    <div style={{ marginTop: 8, fontSize: 12, color: UI.mutedText }}>Shift+Click to pin B.</div>
-                  ) : (
-                    <div style={{ marginTop: 8, fontSize: 12, display: "grid", gap: 6 }}>
-                      <div style={{ fontWeight: 600 }}>{pinB.displayName}</div>
-                      <div>
-                        Value: <span style={{ fontWeight: 600 }}>{typeof currentB?.v === "number" ? fmtMoney(currentB.v) : "-"}</span>{" "}
-                        <span style={{ color: UI.mutedText }}>(n: {typeof currentB?.n === "number" ? currentB.n : "-"})</span>
-                      </div>
-                      <div>
-                        Δ vs prev: <span style={{ fontWeight: 600 }}>{deltaB.abs}</span> <span style={{ color: UI.mutedText }}>({deltaB.pct})</span>
-                      </div>
-
-                      <div
-                        style={{
-                          width: sparkB.w,
-                          height: sparkB.h,
-                          border: `1px solid ${UI.controlBorder}`,
-                          borderRadius: 8,
-                          background: UI.controlBg,
-                          overflow: "hidden",
-                        }}
-                        title="B time-series sparkline"
-                      >
-                        <svg width={sparkB.w} height={sparkB.h}>
-                          <line x1="2" y1={sparkB.h - 6} x2={sparkB.w - 2} y2={sparkB.h - 6} stroke={UI.controlBorder} strokeWidth={1} />
-                          {sparkB.has ? (
-                            <path d={sparkB.d} fill="none" stroke={UI.pinB} strokeWidth={2} />
-                          ) : (
-                            <text x="10" y="26" fontSize="12" fill={UI.controlText} opacity={0.6}>
-                              Not enough data
-                            </text>
-                          )}
-                        </svg>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              {/* A vs B delta */}
-              <div style={{ marginTop: 10, fontSize: 12, color: UI.mutedText }}>
-                {pinA && pinB && typeof currentA?.v === "number" && typeof currentB?.v === "number" ? (
-                  <div>
-                    A − B (current month): <span style={{ fontWeight: 600, color: UI.panelText }}>{fmtMoney(Math.round(currentA.v - currentB.v))}</span>
-                  </div>
-                ) : (
-                  <div>Pin both A and B to see A − B delta.</div>
-                )}
-              </div>
+            <div style={{ fontSize: 12, color: UI.mutedText }}>
+              Range {legend.min === null ? "-" : fmtMoney(legend.min)} – {legend.max === null ? "-" : fmtMoney(legend.max)} · {legend.count} areas with data, {legend.missing} without ({scaleMode === "fixed" ? "scale over all months" : "scale for this month"})
             </div>
           </div>
-        </div>
+        </Section>
 
-        {/* Map controls */}
-        <div style={{ marginBottom: 12 }}>
-          <div style={{ fontWeight: 600, marginBottom: 6 }}>Map controls</div>
-
-          <div style={{ marginBottom: 8 }}>
-            <div style={{ fontSize: 12, opacity: 0.9, marginBottom: 4 }}>Light preset</div>
-            <select
-              value={lightPreset}
-              onChange={(e) => setLightPreset(e.target.value as LightPreset)}
-              style={{
-                width: "100%",
-                padding: 8,
-                borderRadius: 8,
-                border: `1px solid ${UI.controlBorder}`,
-                background: UI.controlBg,
-                color: UI.controlText,
-              }}
-            >
-              <option value="dawn">Dawn</option>
-              <option value="day">Day</option>
-              <option value="dusk">Dusk</option>
-              <option value="night">Night</option>
+        {/* Search */}
+        <Section title="Search & jump">
+          <div style={{ display: "grid", gridTemplateColumns: "130px 1fr", gap: 8, marginBottom: 8 }}>
+            <select value={searchScope} onChange={(e) => setSearchScope(e.target.value as Level)} style={selectStyle}>
+              <option value="localities">Localities</option>
+              <option value="micromarkets">Micromarkets</option>
             </select>
+            <input value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} placeholder="Andheri, Powai, Chembur…" style={selectStyle} />
           </div>
+          {searchResults.length ? (
+            <div style={{ border: `1px solid ${UI.panelBorder}`, borderRadius: 8, overflow: "hidden" }}>
+              {searchResults.map((r) => (
+                <button
+                  key={`${searchScope}-${r.id}`}
+                  onClick={() => jumpTo(searchScope, r)}
+                  style={{ width: "100%", textAlign: "left", padding: "8px 10px", border: "none", borderBottom: `1px solid ${UI.panelBorder}`, background: "rgba(255,255,255,0.03)", color: UI.panelText, cursor: "pointer", fontSize: 12 }}
+                  title="Zoom to this area and pin it as A"
+                >
+                  {r.name}
+                  {searchScope === "localities" && r.micromarketId ? <span style={{ marginLeft: 8, color: UI.mutedText }}>{mmById.get(r.micromarketId)?.name ?? ""}</span> : null}
+                </button>
+              ))}
+            </div>
+          ) : (
+            <div style={{ fontSize: 12, color: UI.mutedText }}>
+              {dimLocalities.length ? `${dimLocalities.length} localities · ${dimMicromarkets.length} micromarkets · ${indexVersion ? "polygons indexed" : "indexing polygons…"}` : "Run scripts/build_dims_public.py to enable search."}
+            </div>
+          )}
+          <div style={{ marginTop: 8, fontSize: 12, color: UI.mutedText }}>
+            Click pins A. <b style={{ color: UI.panelText }}>Shift+Click</b> pins B. Esc clears.
+          </div>
+        </Section>
 
-          <label style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
-            <input type="checkbox" checked={enable3D} onChange={(e) => setEnable3D(e.target.checked)} />
-            3D view (pitch + terrain)
-          </label>
+        {/* Compare */}
+        <Section
+          title="Pinned compare"
+          right={
+            <div style={{ display: "flex", gap: 6 }}>
+              <button onClick={handleExportCsv} disabled={!pinA && !pinB} style={{ ...btnStyle(false, !pinA && !pinB), padding: "5px 8px" }} title="Export pinned series as CSV (C)">
+                CSV
+              </button>
+              <button onClick={() => { stopPlayback(); setPinA(null); setPinB(null); }} disabled={!pinA && !pinB} style={{ ...btnStyle(false, !pinA && !pinB), padding: "5px 8px" }}>
+                Clear
+              </button>
+            </div>
+          }
+        >
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+            {[
+              { label: "A", pin: pinA, cur: currentA, delta: deltaA, spark: sparkA, color: UI.pinA, empty: "Click an area to pin A." },
+              { label: "B", pin: pinB, cur: currentB, delta: deltaB, spark: sparkB, color: UI.pinB, empty: "Shift+Click to pin B." },
+            ].map((p) => (
+              <div key={p.label} style={{ border: `1px solid ${UI.panelBorder}`, borderRadius: 8, padding: 10, background: "rgba(255,255,255,0.03)" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <div style={{ width: 10, height: 10, borderRadius: 999, background: p.color }} />
+                  <div style={{ fontWeight: 600, fontSize: 12 }}>{p.label}</div>
+                </div>
+                {!p.pin ? (
+                  <div style={{ marginTop: 8, fontSize: 12, color: UI.mutedText }}>{p.empty}</div>
+                ) : (
+                  <div style={{ marginTop: 8, fontSize: 12, display: "grid", gap: 6 }}>
+                    <div style={{ fontWeight: 600 }}>{p.pin.displayName}</div>
+                    <div style={{ color: UI.mutedText }}>{p.pin.level}</div>
+                    <div>
+                      Value: <b>{typeof p.cur?.v === "number" ? fmtMoney(p.cur.v) : "-"}</b> <span style={{ color: UI.mutedText }}>(n: {typeof p.cur?.n === "number" ? p.cur.n : "-"})</span>
+                    </div>
+                    <div>
+                      Δ vs prev: <b>{p.delta.abs}</b> <span style={{ color: UI.mutedText }}>({p.delta.pct})</span>
+                    </div>
+                    <div style={{ width: p.spark.w, height: p.spark.h, border: `1px solid ${UI.controlBorder}`, borderRadius: 8, background: UI.controlBg, overflow: "hidden" }}>
+                      <svg width={p.spark.w} height={p.spark.h}>
+                        <line x1="2" y1={p.spark.h - 6} x2={p.spark.w - 2} y2={p.spark.h - 6} stroke={UI.controlBorder} strokeWidth={1} />
+                        {p.spark.has ? (
+                          <path d={p.spark.d} fill="none" stroke={p.color} strokeWidth={2} />
+                        ) : (
+                          <text x="10" y="26" fontSize="12" fill={UI.controlText} opacity={0.6}>
+                            Not enough data
+                          </text>
+                        )}
+                      </svg>
+                    </div>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+          <div style={{ marginTop: 10, fontSize: 12, color: UI.mutedText }}>
+            {pinA && pinB && typeof currentA?.v === "number" && typeof currentB?.v === "number" ? (
+              <div>
+                A − B ({metricMonth ? parseMonthLabel(metricMonth) : "-"}): <b style={{ color: UI.panelText }}>{fmtMoney(Math.round(currentA.v - currentB.v))}</b>
+              </div>
+            ) : (
+              <div>Pin both A and B to see the A − B delta.</div>
+            )}
+          </div>
+        </Section>
 
-          <button
-            onClick={resetView}
-            style={{
-              width: "100%",
-              fontSize: 12,
-              padding: "10px 12px",
-              border: `1px solid ${UI.controlBorder}`,
-              borderRadius: 8,
-              background: UI.controlBg,
-              color: UI.controlText,
-              cursor: "pointer",
-            }}
-            title="Reset view (R)"
-          >
+        {/* Basemap */}
+        <Section title="Basemap">
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
+            <div>
+              <Label>Light</Label>
+              <select value={lightPreset} onChange={(e) => setLightPreset(e.target.value as LightPreset)} style={selectStyle}>
+                <option value="dawn">Dawn</option>
+                <option value="day">Day</option>
+                <option value="dusk">Dusk</option>
+                <option value="night">Night</option>
+              </select>
+            </div>
+            <div>
+              <Label>Theme</Label>
+              <select value={theme} onChange={(e) => setTheme(e.target.value as BasemapTheme)} style={selectStyle} title="Mapbox Standard theme; faded/monochrome make data layers stand out">
+                <option value="default">Default</option>
+                <option value="faded">Faded</option>
+                <option value="monochrome">Monochrome</option>
+              </select>
+            </div>
+          </div>
+          <Check label="3D view (pitch + 3D buildings)" checked={enable3D} onChange={setEnable3D} />
+          <Check label="Terrain (DEM, mostly flat here)" checked={terrain} onChange={setTerrain} />
+          <Check label="Basemap place labels" checked={showPlaceLabels} onChange={setShowPlaceLabels} />
+          <Check label="Basemap road labels" checked={showRoadLabels} onChange={setShowRoadLabels} />
+          <Check label="Basemap POI labels" checked={showPoiLabels} onChange={setShowPoiLabels} />
+          <button onClick={resetView} style={{ ...btnStyle(false), width: "100%", marginTop: 4 }} title="Reset view (R)">
             Reset view (R)
           </button>
-        </div>
+        </Section>
 
-        {/* Inspect target */}
-        <div style={{ marginBottom: 10 }}>
-          <div style={{ fontWeight: 600, marginBottom: 6 }}>Inspect target</div>
-          <select
-            value={inspectTarget}
-            onChange={(e) => {
-              stopPlayback();
-              setHoverInfo(null);
-              setClickInfo(null);
-              setInspectTarget(e.target.value as InspectTarget);
-            }}
-            style={{
-              width: "100%",
-              padding: 8,
-              borderRadius: 8,
-              border: `1px solid ${UI.controlBorder}`,
-              background: UI.controlBg,
-              color: UI.controlText,
-            }}
-          >
-            <option value="localities">Localities (polygons)</option>
-            <option value="micromarkets">Micromarkets (polygons)</option>
-            <option value="projects">Projects (points)</option>
-            <option value="roads">Roads (lines)</option>
-            <option value="city">City (outline)</option>
+        {/* Inspect */}
+        <Section title="Inspect">
+          <Label>Hover / click target</Label>
+          <select value={inspectTarget} onChange={(e) => { setHoverInfo(null); setClickInfo(null); setInspectTarget(e.target.value as InspectTarget); }} style={{ ...selectStyle, marginBottom: 8 }}>
+            <option value="auto">Auto (follows zoom) · {effectiveInspect}</option>
+            <option value="micromarkets">Micromarkets</option>
+            <option value="localities">Localities</option>
+            <option value="projects">Projects</option>
+            <option value="roads">Roads</option>
+            <option value="city">City outline</option>
           </select>
-        </div>
 
-        {/* Layer visibility */}
-        <div style={{ marginBottom: 12 }}>
-          <div style={{ fontWeight: 600, marginBottom: 6 }}>Layer visibility</div>
+          {[
+            { title: "Hover", info: hoverInfo, empty: "Hover a feature on the map…" },
+            { title: "Clicked", info: clickInfo, empty: "Click a feature to pin its details…" },
+          ].map((s) => (
+            <div key={s.title} style={{ marginBottom: 8 }}>
+              <div style={{ fontWeight: 600, fontSize: 12, marginBottom: 4 }}>{s.title}</div>
+              {s.info ? (
+                <div style={{ fontSize: 12 }}>
+                  <div>
+                    <b>{s.info.name}</b> <span style={{ color: UI.mutedText }}>({s.info.kind}{s.info.featureId !== null ? ` #${s.info.featureId}` : ""})</span>
+                  </div>
+                  <details style={{ marginTop: 4 }}>
+                    <summary style={{ cursor: "pointer", color: UI.mutedText }}>properties</summary>
+                    <pre style={{ fontSize: 11, whiteSpace: "pre-wrap", marginTop: 4 }}>{safeJson(s.info.properties)}</pre>
+                  </details>
+                </div>
+              ) : (
+                <div style={{ fontSize: 12, color: UI.mutedText }}>{s.empty}</div>
+              )}
+            </div>
+          ))}
+        </Section>
 
-          <label style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 6 }}>
-            <input type="checkbox" checked={showLocalities} onChange={(e) => setShowLocalities(e.target.checked)} />
-            Localities
-          </label>
-
-          <label style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 6 }}>
-            <input type="checkbox" checked={showMicromarkets} onChange={(e) => setShowMicromarkets(e.target.checked)} />
-            Micromarkets
-          </label>
-
-          <label style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 6 }}>
-            <input type="checkbox" checked={showProjects} onChange={(e) => setShowProjects(e.target.checked)} />
-            Projects
-          </label>
-
-          <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
-            <input type="checkbox" checked={showRoads} onChange={(e) => setShowRoads(e.target.checked)} />
-            Roads
-          </label>
-        </div>
-
-        {/* Hover / Click debug */}
-        <div style={{ marginBottom: 12 }}>
-          <div style={{ fontWeight: 600 }}>Hover</div>
-          {hoverInfo ? <pre style={{ fontSize: 12, whiteSpace: "pre-wrap" }}>{safeJson(hoverInfo)}</pre> : <div style={{ fontSize: 12, color: UI.mutedText }}>Hover a feature on the map…</div>}
-        </div>
-
-        <div>
-          <div style={{ fontWeight: 600 }}>Click (Pinned)</div>
-          {clickInfo ? <pre style={{ fontSize: 12, whiteSpace: "pre-wrap" }}>{safeJson(clickInfo)}</pre> : <div style={{ fontSize: 12, color: UI.mutedText }}>Click a feature to pin its properties…</div>}
-        </div>
-
-        <hr style={{ margin: "12px 0", borderColor: UI.panelBorder }} />
-
-        <div style={{ fontSize: 12, color: UI.mutedText }}>
-          <div style={{ fontWeight: 600, marginBottom: 6, color: UI.panelText }}>Notes</div>
-          <ul style={{ margin: "6px 0 0 18px" }}>
-            <li>Quantile legend is computed from the full month distribution (not only viewport).</li>
-            <li>Feature-state is applied only to visible polygons and cached per (metric, level, month).</li>
-            <li>Shift+Click pins B for compare.</li>
-            <li>URL is shareable: metric/level/month/pins/light/3D are encoded in query params.</li>
-            <li>Exports: Press P for PNG, J for State JSON.</li>
-          </ul>
-        </div>
+        {/* Exports */}
+        <Section title="Exports & share">
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
+            <button onClick={handleExportPng} disabled={!mapReady} style={btnStyle(false, !mapReady)} title="Export map canvas as PNG (P)">
+              PNG (P)
+            </button>
+            <button onClick={handleExportStateJson} style={btnStyle(false)} title="Export inspector state as JSON (J)">
+              State (J)
+            </button>
+            <button onClick={copyShareUrl} style={btnStyle(false)} title="Copy a shareable URL with the current state">
+              Copy URL
+            </button>
+          </div>
+          <div style={{ marginTop: 8, fontSize: 11, color: UI.mutedText }}>
+            Shortcuts: R reset · Space play/pause · P png · J state · C pinned CSV · Esc clear pins. Shortcuts are ignored while typing.
+          </div>
+        </Section>
       </div>
     </div>
   );
-}
-
-function targetToLayerId(target: InspectTarget) {
-  switch (target) {
-    case "localities":
-      return HIT_LAYERS.localities;
-    case "micromarkets":
-      return HIT_LAYERS.micromarkets;
-    case "projects":
-      return HIT_LAYERS.projects;
-    case "roads":
-      return HIT_LAYERS.roads;
-    case "city":
-      return HIT_LAYERS.city;
-  }
-}
-
-function setLayerVisibility(map: Map, layerId: string, visible: boolean) {
-  if (!map.getLayer(layerId)) return;
-  map.setLayoutProperty(layerId, "visibility", visible ? "visible" : "none");
 }
