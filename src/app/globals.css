@@ -37,6 +37,37 @@ a {
   text-decoration: none;
 }
 
+/* Map hover popup */
+.gm-popup .mapboxgl-popup-content {
+  background: rgba(11, 15, 25, 0.92);
+  color: #e5e7eb;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.45;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+  pointer-events: none;
+}
+.gm-popup .mapboxgl-popup-tip {
+  border-top-color: rgba(11, 15, 25, 0.92) !important;
+  border-bottom-color: rgba(11, 15, 25, 0.92) !important;
+}
+.gm-popup .gm-pop-title {
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+.gm-popup .gm-pop-muted {
+  color: rgba(229, 231, 235, 0.7);
+}
+
+/* Mapbox controls on the dark map */
+.mapboxgl-ctrl-scale {
+  background: rgba(11, 15, 25, 0.7);
+  color: #e5e7eb;
+  border-color: rgba(255, 255, 255, 0.4);
+}
+
 @media (prefers-color-scheme: dark) {
   html {
     color-scheme: dark;
