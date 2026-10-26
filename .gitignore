@@ -49,3 +49,9 @@ next-env.d.ts
 *.csv
 !src/**.csv
 !public/**.csv
+
+# python virtualenv for scripts/
+.venv/
+
+# derived master plan analysis images (JSON is kept)
+public/projects/*/analysis/*.png

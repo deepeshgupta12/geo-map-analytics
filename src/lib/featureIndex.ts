@@ -238,6 +238,22 @@ export class FeatureIndex {
     return this.version;
   }
 
+  /** One point per indexed polygon with a positive count, for the count bubbles. */
+  toCountGeoJSON(countOf: (level: Level, id: number) => number): GeoJSON.FeatureCollection<GeoJSON.Point> {
+    const features: GeoJSON.Feature<GeoJSON.Point>[] = [];
+    for (const e of this.entries.values()) {
+      const count = countOf(e.level, e.id);
+      if (!(count > 0)) continue;
+      features.push({
+        type: "Feature",
+        id: e.id,
+        geometry: { type: "Point", coordinates: [e.cx, e.cy] },
+        properties: { level: e.level, id: e.id, name: e.name, count, mmId: e.level === "micromarkets" ? e.id : e.mmId },
+      });
+    }
+    return { type: "FeatureCollection", features };
+  }
+
   toLabelGeoJSON(): GeoJSON.FeatureCollection<GeoJSON.Point> {
     const features: GeoJSON.Feature<GeoJSON.Point>[] = [];
     for (const e of this.entries.values()) {

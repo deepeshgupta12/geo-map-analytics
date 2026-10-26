@@ -21,6 +21,7 @@ import {
   heatRampFor,
   STATUS_GROUPS,
   STATUS_OTHER_COLOR,
+  BUBBLE,
 } from "@/config/layers";
 
 type Expr = ExpressionSpecification;
@@ -54,6 +55,12 @@ export function addDataSources(map: Map) {
 
   if (!map.getSource(SRC.labels)) {
     map.addSource(SRC.labels, {
+      type: "geojson",
+      data: { type: "FeatureCollection", features: [] },
+    });
+  }
+  if (!map.getSource(SRC.counts)) {
+    map.addSource(SRC.counts, {
       type: "geojson",
       data: { type: "FeatureCollection", features: [] },
     });
@@ -303,6 +310,91 @@ export function addDataLayers(map: Map, preset: LightPreset) {
       "text-halo-width": 1.4,
       "text-opacity": expr(["interpolate", ["linear"], ["zoom"], Z_LOC - 0.3, 0, Z_LOC + 0.3, 1]),
     },
+  });
+
+  // ---- Project count bubbles ----
+  // Micromarket totals at city zoom, locality totals in the localities band; both
+  // sit just below the area name label and dissolve as the next band takes over.
+  const bubbleFont = ["DIN Pro Bold", "Arial Unicode MS Bold"];
+  const mmFade = expr(["interpolate", ["linear"], ["zoom"], Z_LOC - 0.3, 0.95, Z_LOC + 0.3, 0]);
+  const locFade = expr(["interpolate", ["linear"], ["zoom"], Z_LOC - 0.3, 0, Z_LOC + 0.3, 0.95, Z_PROJ - 0.4, 0.95, Z_PROJ + 0.3, 0]);
+
+  map.addLayer({
+    id: LYR.countMm,
+    type: "circle",
+    source: SRC.counts,
+    slot: SLOT.points,
+    filter: ["==", ["get", "level"], "micromarkets"],
+    maxzoom: Z_LOC + 0.3,
+    paint: {
+      "circle-radius": expr(["interpolate", ["linear"], ["sqrt", ["get", "count"]], 1, 12, 40, 18, 90, 24, 140, 30]),
+      "circle-color": BUBBLE.fill,
+      "circle-stroke-color": BUBBLE.stroke,
+      "circle-stroke-width": 2,
+      "circle-opacity": mmFade,
+      "circle-stroke-opacity": mmFade,
+      // Screen-space offset below the (two-line) area label; viewport anchor so the
+      // pitch does not foreshorten it and the number offset lines up.
+      "circle-translate": [0, 44],
+      "circle-translate-anchor": "viewport",
+      "circle-emissive-strength": 1,
+    },
+  });
+  map.addLayer({
+    id: LYR.countMmText,
+    type: "symbol",
+    source: SRC.counts,
+    slot: SLOT.labels,
+    filter: ["==", ["get", "level"], "micromarkets"],
+    maxzoom: Z_LOC + 0.3,
+    layout: {
+      "text-field": ["to-string", ["get", "count"]],
+      "text-font": bubbleFont,
+      "text-size": 13,
+      "text-offset": [0, 3.4],
+      "text-allow-overlap": true,
+      "text-ignore-placement": true,
+    },
+    paint: { "text-color": BUBBLE.text, "text-opacity": mmFade },
+  });
+
+  map.addLayer({
+    id: LYR.countLoc,
+    type: "circle",
+    source: SRC.counts,
+    slot: SLOT.points,
+    filter: ["==", ["get", "level"], "localities"],
+    minzoom: Z_LOC - 0.3,
+    maxzoom: Z_PROJ + 0.3,
+    paint: {
+      "circle-radius": expr(["interpolate", ["linear"], ["sqrt", ["get", "count"]], 1, 9, 5, 12, 15, 16, 40, 22]),
+      "circle-color": BUBBLE.fill,
+      "circle-stroke-color": BUBBLE.stroke,
+      "circle-stroke-width": 1.5,
+      "circle-opacity": locFade,
+      "circle-stroke-opacity": locFade,
+      "circle-translate": [0, 18],
+      "circle-translate-anchor": "viewport",
+      "circle-emissive-strength": 1,
+    },
+  });
+  map.addLayer({
+    id: LYR.countLocText,
+    type: "symbol",
+    source: SRC.counts,
+    slot: SLOT.labels,
+    filter: ["==", ["get", "level"], "localities"],
+    minzoom: Z_LOC - 0.3,
+    maxzoom: Z_PROJ + 0.3,
+    layout: {
+      "text-field": ["to-string", ["get", "count"]],
+      "text-font": bubbleFont,
+      "text-size": 11,
+      "text-offset": [0, 1.64],
+      "text-allow-overlap": true,
+      "text-ignore-placement": true,
+    },
+    paint: { "text-color": BUBBLE.text, "text-opacity": locFade },
   });
 
   // ---- Invisible hit layers ----

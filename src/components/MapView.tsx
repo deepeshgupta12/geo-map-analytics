@@ -227,6 +227,11 @@ export default function MapView() {
   const zoomToAreaRef = useRef<((level: Level, id: number, name: string) => boolean) | null>(null);
   // Re-evaluates the hover card (e.g. after the month changes during playback).
   const rehoverRef = useRef<(() => void) | null>(null);
+  // Project counts per locality / micromarket (public/dim/project_counts_city13.json).
+  const countsRef = useRef<{ byLocality: Record<string, number>; byMicromarket: Record<string, number>; total: number } | null>(null);
+  const rebuildCountsRef = useRef<(() => void) | null>(null);
+  // Stops the slow orbit around a selected project (Esc, panel button, user move).
+  const stopOrbitRef = useRef<(() => void) | null>(null);
 
   const [mapReady, setMapReady] = useState(false);
   const [hoverInfo, setHoverInfo] = useState<PickInfo | null>(null);
@@ -237,6 +242,7 @@ export default function MapView() {
   const [zoomDisplay, setZoomDisplay] = useState(DEFAULT_ZOOM);
   const [focus, setFocus] = useState<Focus>(NO_FOCUS);
   const [projectsInView, setProjectsInView] = useState(0);
+  const [orbiting, setOrbiting] = useState(false);
   // Bumped whenever the style (re)loads so every map-touching effect re-applies itself.
   const [styleEpoch, setStyleEpoch] = useState(0);
   // Bumped when the engine's join rules change and the choropleth must re-render.
@@ -249,6 +255,7 @@ export default function MapView() {
   const [showProjects, setShowProjects] = useState(true);
   const [showRoads, setShowRoads] = useState(false);
   const [showLabels, setShowLabels] = useState(true);
+  const [showCounts, setShowCounts] = useState(true);
   const [extrude, setExtrude] = useState(false);
   const [inspectTarget, setInspectTarget] = useState<InspectTarget>("auto");
 
@@ -260,6 +267,8 @@ export default function MapView() {
   const [showPlaceLabels, setShowPlaceLabels] = useState(true);
   const [showRoadLabels, setShowRoadLabels] = useState(false);
   const [showPoiLabels, setShowPoiLabels] = useState(false);
+  // Performance mode: no 3D buildings/landmarks, no terrain.
+  const [perfMode, setPerfMode] = useState(false);
 
   // Choropleth
   const [enableChoropleth, setEnableChoropleth] = useState(true);
@@ -454,6 +463,7 @@ export default function MapView() {
       if (scale === "fixed" || scale === "month") setScaleMode(scale);
       if (ex === "1") setExtrude(true);
       if (sp.get("cf") === "0") setCarryFwd(false);
+      if (sp.get("pm") === "1") setPerfMode(true);
     }
 
     const parsePin = (s: string | null): PinnedSelection | null => {
@@ -488,6 +498,7 @@ export default function MapView() {
     put("scale", scaleMode, "fixed");
     put("ex", extrude ? "1" : "0", "0");
     put("cf", carryFwd ? "1" : "0", "1");
+    put("pm", perfMode ? "1" : "0", "0");
     const encPin = (p: PinnedSelection | null) =>
       p ? `${p.level}:${encodeURIComponent(p.joinKey)}:${encodeURIComponent(p.displayName)}` : null;
     const a = encPin(pinA);
@@ -497,7 +508,7 @@ export default function MapView() {
     if (b) sp.set("pinB", b);
     else sp.delete("pinB");
     window.history.replaceState({}, "", `${window.location.pathname}?${sp.toString()}`);
-  }, [metricKey, levelMode, metricMonth, lightPreset, theme, enable3D, enableChoropleth, showHeat, scaleMode, extrude, carryFwd, pinA, pinB]);
+  }, [metricKey, levelMode, metricMonth, lightPreset, theme, enable3D, enableChoropleth, showHeat, scaleMode, extrude, carryFwd, perfMode, pinA, pinB]);
 
   // ---------------------------------------------------------------------------
   // Dims (search + drill-down joins)
@@ -518,6 +529,28 @@ export default function MapView() {
         setDimMicromarkets(mm.items ?? []);
       } catch (e) {
         console.warn("Dim docs not found (run scripts/build_dims_public.py):", e);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // ---------------------------------------------------------------------------
+  // Project counts (precomputed by scripts/build_project_counts.mjs)
+  // ---------------------------------------------------------------------------
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch("/dim/project_counts_city13.json", { cache: "no-store" });
+        if (!res.ok) throw new Error(`counts ${res.status}`);
+        const doc = (await res.json()) as { byLocality: Record<string, number>; byMicromarket: Record<string, number>; total: number };
+        if (cancelled) return;
+        countsRef.current = doc;
+        rebuildCountsRef.current?.();
+      } catch (e) {
+        console.warn("Project counts not found (run scripts/build_project_counts.mjs):", e);
       }
     })();
     return () => {
@@ -627,8 +660,11 @@ export default function MapView() {
       zoom: cam ? cam.zoom : DEFAULT_ZOOM,
       pitch: cam?.pitch !== undefined ? cam.pitch : init.enable3D ? DEFAULT_PITCH_3D : 0,
       bearing: cam?.bearing !== undefined ? cam.bearing : init.enable3D ? DEFAULT_BEARING_3D : 0,
-      antialias: true,
-      preserveDrawingBuffer: true, // required for PNG export
+      antialias: false, // MSAA is costly on high-DPI screens and the data layers do not need it
+      preserveDrawingBuffer: false, // PNG export reads the canvas inside a render callback instead
+      fadeDuration: 150,
+      maxPitch: 65,
+      refreshExpiredTiles: false,
       config: {
         basemap: {
           lightPreset: init.lightPreset,
@@ -799,6 +835,7 @@ export default function MapView() {
           if (c1 || c2 || c3) {
             const src = map.getSource(SRC.labels) as mapboxgl.GeoJSONSource | undefined;
             src?.setData(idx.toLabelGeoJSON());
+            rebuildCounts();
             setIndexVersion(idx.getVersion());
           }
         }
@@ -960,6 +997,76 @@ export default function MapView() {
         return null;
       };
 
+      // ---- project count bubbles (GeoJSON at polygon centroids) ----
+      const rebuildCounts = () => {
+        const counts = countsRef.current;
+        const src = map.getSource(SRC.counts) as mapboxgl.GeoJSONSource | undefined;
+        if (!counts || !src) return;
+        // Localities with a single project get no bubble (the dot itself shows at project zoom).
+        src.setData(
+          indexRef.current.toCountGeoJSON((level, id) => {
+            if (level === "micromarkets") return counts.byMicromarket[String(id)] ?? 0;
+            const n = counts.byLocality[String(id)] ?? 0;
+            return n >= 2 ? n : 0;
+          })
+        );
+      };
+      rebuildCountsRef.current = rebuildCounts;
+      const pickBubble = (point: mapboxgl.PointLike): { level: Level; id: number; name: string; count: number } | null => {
+        if (!map.getLayer(LYR.countMm)) return null;
+        let feats: RenderedFeature[] = [];
+        try {
+          feats = map.queryRenderedFeatures(point, { layers: [LYR.countMm, LYR.countLoc] }) as unknown as RenderedFeature[];
+        } catch {
+          return null;
+        }
+        const f = feats[0];
+        if (!f) return null;
+        const p = (f.properties ?? {}) as Record<string, unknown>;
+        const id = toNumericId(p.id);
+        if (id === null) return null;
+        return {
+          level: p.level === "micromarkets" ? "micromarkets" : "localities",
+          id,
+          name: typeof p.name === "string" ? p.name : "",
+          count: typeof p.count === "number" ? p.count : Number(p.count) || 0,
+        };
+      };
+
+      // ---- orbit: one revolution per minute around a project, until the user moves the map ----
+      const orbit = { active: false };
+      const orbitStep = () => {
+        if (!orbit.active) return;
+        // 120° per 20 s, linear; chained from moveend so a full turn is three steps.
+        map.rotateTo(map.getBearing() + 120, { duration: 20000, easing: (t: number) => t, essential: true });
+      };
+      const onOrbitMoveEnd = () => {
+        if (orbit.active) orbitStep();
+      };
+      const startOrbit = (center: [number, number]) => {
+        orbit.active = true;
+        setOrbiting(true);
+        map.easeTo({ center, duration: 700, essential: true }); // its moveend starts the first step
+      };
+      const stopOrbit = () => {
+        if (!orbit.active) return;
+        orbit.active = false;
+        setOrbiting(false);
+        map.stop();
+      };
+      stopOrbitRef.current = stopOrbit;
+      map.on("moveend", onOrbitMoveEnd);
+      // Scroll-zoom's movestart carries no originalEvent, so listen to the raw
+      // interaction events: any of them ends the orbit and releases a click-set focus.
+      const onUserInteract = () => {
+        focusHintRef.current = null;
+        stopOrbit();
+      };
+      map.on("wheel", onUserInteract);
+      map.on("mousedown", onUserInteract);
+      map.on("touchstart", onUserInteract);
+      map.on("dragstart", onUserInteract);
+
       let rafId: number | null = null;
       const clearHover = () => {
         map.getCanvas().style.cursor = "";
@@ -973,6 +1080,19 @@ export default function MapView() {
         rafId = null;
         const pt = hoverPointRef.current;
         if (!pt) return;
+        const bubble = pickBubble([pt.x, pt.y]);
+        if (bubble) {
+          map.getCanvas().style.cursor = "pointer";
+          setHover(null, null);
+          setHoverInfo(null);
+          popup
+            .setLngLat(map.unproject([pt.x, pt.y]))
+            .setHTML(
+              `<div class="gm-pop-title">${escapeHtml(bubble.name)}</div><div>${bubble.count.toLocaleString("en-IN")} projects</div><div class="gm-pop-muted">click to zoom in</div>`
+            )
+            .addTo(map);
+          return;
+        }
         const picked = pickAt([pt.x, pt.y]);
         if (!picked) {
           clearHover();
@@ -1004,8 +1124,12 @@ export default function MapView() {
       const onMoveStartHover = (e: { originalEvent?: unknown }) => {
         setHover(null, null);
         popup.remove();
-        // A user-driven move (wheel, drag, control button) releases a click-set focus.
-        if (e.originalEvent) focusHintRef.current = null;
+        // A user-driven move (wheel, drag, control button) releases a click-set focus
+        // and stops the orbit.
+        if (e.originalEvent) {
+          focusHintRef.current = null;
+          stopOrbit();
+        }
       };
       const onMoveEndHover = () => {
         if (hoverPointRef.current) scheduleHover();
@@ -1049,6 +1173,11 @@ export default function MapView() {
 
       // ---- click: pin + drill ----
       const onClick = (e: MapMouseEvent) => {
+        const bubble = pickBubble(e.point);
+        if (bubble) {
+          zoomToArea(bubble.level, bubble.id, bubble.name, null);
+          return;
+        }
         const picked = pickAt(e.point);
         if (!picked) {
           setClickInfo(null);
@@ -1059,6 +1188,15 @@ export default function MapView() {
         const id = toNumericId(f.id);
         const d = describe(kind, props, id);
         setClickInfo({ kind, name: d.name, featureId: id, properties: props, lngLat: { lng: e.lngLat.lng, lat: e.lngLat.lat } });
+
+        // Clicking a project starts the slow orbit around it (the 3D rendering will
+        // use the same entry point).
+        if (kind === "projects") {
+          const g = f.geometry as { type?: string; coordinates?: unknown } | undefined;
+          const c = g?.type === "Point" && Array.isArray(g.coordinates) ? (g.coordinates as [number, number]) : [e.lngLat.lng, e.lngLat.lat];
+          startOrbit([c[0], c[1]]);
+          return;
+        }
 
         const assignToB = isShiftPressed(e.originalEvent) || shiftDownRef.current === true;
         shiftDownRef.current = false;
@@ -1094,6 +1232,11 @@ export default function MapView() {
         map.off("mouseout", onLeave);
         map.off("movestart", onMoveStartHover);
         map.off("moveend", onMoveEndHover);
+        map.off("moveend", onOrbitMoveEnd);
+        map.off("wheel", onUserInteract);
+        map.off("mousedown", onUserInteract);
+        map.off("touchstart", onUserInteract);
+        map.off("dragstart", onUserInteract);
         map.off("click", onClick);
         if (rafId !== null) window.cancelAnimationFrame(rafId);
       });
@@ -1124,6 +1267,7 @@ export default function MapView() {
       const k = ev.key.toLowerCase();
       if (ev.key === "Escape") {
         stopPlayback();
+        stopOrbitRef.current?.();
         setPinA(null);
         setPinB(null);
         setClickInfo(null);
@@ -1178,7 +1322,7 @@ export default function MapView() {
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !mapReady) return;
-    setConfig("show3dObjects", enable3D);
+    setConfig("show3dObjects", enable3D && !perfMode);
     // First run: keep a camera that came from the URL; otherwise snap to the 2D/3D default.
     if (!applied3DRef.current) {
       applied3DRef.current = true;
@@ -1188,7 +1332,7 @@ export default function MapView() {
     }
     map.easeTo({ pitch: enable3D ? DEFAULT_PITCH_3D : 0, bearing: enable3D ? DEFAULT_BEARING_3D : 0, duration: 700 });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [enable3D, mapReady, styleEpoch]);
+  }, [enable3D, perfMode, mapReady, styleEpoch]);
 
   // Terrain (optional)
   useEffect(() => {
@@ -1201,7 +1345,7 @@ export default function MapView() {
         map.once("idle", apply);
         return;
       }
-      if (terrain) {
+      if (terrain && !perfMode) {
         if (!map.getSource(SRC.dem)) {
           try {
             map.addSource(SRC.dem, { type: "raster-dem", url: "mapbox://mapbox.mapbox-terrain-dem-v1", tileSize: 512, maxzoom: 14 });
@@ -1227,7 +1371,7 @@ export default function MapView() {
     return () => {
       cancelled = true;
     };
-  }, [terrain, mapReady, styleEpoch]);
+  }, [terrain, perfMode, mapReady, styleEpoch]);
 
   // ---------------------------------------------------------------------------
   // Layer toggles
@@ -1242,10 +1386,14 @@ export default function MapView() {
     setVisibility(map, LYR.hitRoads, showRoads);
     setVisibility(map, LYR.mmLabels, showLabels);
     setVisibility(map, LYR.locLabels, showLabels);
+    setVisibility(map, LYR.countMm, showCounts);
+    setVisibility(map, LYR.countMmText, showCounts);
+    setVisibility(map, LYR.countLoc, showCounts);
+    setVisibility(map, LYR.countLocText, showCounts);
     // Layers that were hidden skipped preset recolouring; apply it now that they are visible.
     applyPresetColors(map, lightPreset);
     engineRef.current?.setOpacityLevel(showHeat ? 0.45 : CHOROPLETH_OPACITY);
-  }, [showHeat, showProjects, showRoads, showLabels, lightPreset, mapReady, styleEpoch]);
+  }, [showHeat, showProjects, showRoads, showLabels, showCounts, lightPreset, mapReady, styleEpoch]);
 
   // ---------------------------------------------------------------------------
   // Drill-down filters (focused micromarket -> its localities; focused locality -> its projects)
@@ -1262,10 +1410,14 @@ export default function MapView() {
       const filter = FILTERS.idIn(ids);
       for (const id of locLayers) setFilterSafe(map, id, filter);
       setFilterSafe(map, LYR.locLabels, FILTERS.labelsLevelInMm("localities", focus.mmId!));
+      setFilterSafe(map, LYR.countLoc, FILTERS.labelsLevelInMm("localities", focus.mmId!));
+      setFilterSafe(map, LYR.countLocText, FILTERS.labelsLevelInMm("localities", focus.mmId!));
       setFilterSafe(map, LYR.mmMask, FILTERS.notId(focus.mmId!));
     } else {
       for (const id of locLayers) setFilterSafe(map, id, null);
       setFilterSafe(map, LYR.locLabels, FILTERS.labelsLevel("localities"));
+      setFilterSafe(map, LYR.countLoc, FILTERS.labelsLevel("localities"));
+      setFilterSafe(map, LYR.countLocText, FILTERS.labelsLevel("localities"));
       setFilterSafe(map, LYR.mmMask, FILTERS.noFeature);
     }
 
@@ -1461,12 +1613,23 @@ export default function MapView() {
     const map = mapRef.current;
     if (!map) return;
     try {
-      const a = document.createElement("a");
-      a.href = map.getCanvas().toDataURL("image/png");
-      a.download = `${exportBaseName()}.png`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
+      // Without preserveDrawingBuffer the canvas is only readable inside a render
+      // callback, so request a repaint and read it there.
+      const name = `${exportBaseName()}.png`;
+      map.once("render", () => {
+        try {
+          const a = document.createElement("a");
+          a.href = map.getCanvas().toDataURL("image/png");
+          a.download = name;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+        } catch (err) {
+          console.error("PNG export failed:", err);
+          alert("PNG export failed. See console.");
+        }
+      });
+      map.triggerRepaint();
     } catch (e) {
       console.error("PNG export failed:", e);
       alert("PNG export failed (tainted canvas?). See console.");
@@ -1672,6 +1835,14 @@ export default function MapView() {
               </>
             ) : null}
           </div>
+          {orbiting ? (
+            <div style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
+              <span style={{ color: UI.mutedText }}>Orbiting the selected project (one turn per minute)</span>
+              <button onClick={() => stopOrbitRef.current?.()} style={{ ...btnStyle(false), padding: "4px 8px" }} title="Esc also stops it">
+                Stop orbit
+              </button>
+            </div>
+          ) : null}
         </Section>
 
         {/* Layers */}
@@ -1681,6 +1852,7 @@ export default function MapView() {
           <Check label={`Project dots (from z${Z_PROJ})`} checked={showProjects} onChange={setShowProjects} />
           <Check label="3D bars (extrude polygons by value)" checked={extrude} onChange={setExtrude} disabled={!enableChoropleth} />
           <Check label="Area name labels" checked={showLabels} onChange={setShowLabels} />
+          <Check label="Project count bubbles (per micromarket, then per locality)" checked={showCounts} onChange={setShowCounts} hint="Click a bubble to zoom into that area" />
           <Check label="Roads tileset" checked={showRoads} onChange={setShowRoads} />
         </Section>
 
@@ -1907,6 +2079,7 @@ export default function MapView() {
           </div>
           <Check label="3D view (pitch + 3D buildings)" checked={enable3D} onChange={setEnable3D} />
           <Check label="Terrain (DEM, mostly flat here)" checked={terrain} onChange={setTerrain} />
+          <Check label="Performance mode (no 3D buildings, landmarks or terrain)" checked={perfMode} onChange={setPerfMode} hint="Lighter basemap for slower machines" />
           <Check label="Basemap place labels" checked={showPlaceLabels} onChange={setShowPlaceLabels} />
           <Check label="Basemap road labels" checked={showRoadLabels} onChange={setShowRoadLabels} />
           <Check label="Basemap POI labels" checked={showPoiLabels} onChange={setShowPoiLabels} />

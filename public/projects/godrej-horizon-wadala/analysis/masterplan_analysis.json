@@ -1,0 +1,747 @@
+{
+  "slug": "godrej-horizon-wadala",
+  "image": "masterplan.jpg",
+  "image_quality": {
+    "score": 0.52,
+    "label": "Low",
+    "reasons": [
+      "Image resolution is low.",
+      "Image sharpness appears good.",
+      "Image brightness may be too low or too high.",
+      "Image has enough color variation for visual class detection.",
+      "Image file size is within configured limit.",
+      "Sharpness metric: 1462.1345",
+      "Brightness metric: 225.5542",
+      "Colorfulness metric: 35.827"
+    ]
+  },
+  "artifacts": [
+    {
+      "artifact_type": "cleaned_master_plan_input",
+      "path": "/Users/deepeshgupta/geo-map-analytics/public/projects/godrej-horizon-wadala/analysis/godrej-horizon-wadala_cleaned_plan_input.png",
+      "description": "White-margin-reduced master plan input for structure extraction."
+    },
+    {
+      "artifact_type": "plan_region_crop",
+      "path": "/Users/deepeshgupta/geo-map-analytics/public/projects/godrej-horizon-wadala/analysis/godrej-horizon-wadala_plan_region_crop.png",
+      "description": "Approximate plan-focused crop used for visual interpretation."
+    },
+    {
+      "artifact_type": "legend_region_crop",
+      "path": "/Users/deepeshgupta/geo-map-analytics/public/projects/godrej-horizon-wadala/analysis/godrej-horizon-wadala_legend_region_crop.png",
+      "description": "Approximate lower legend/details crop used for legend extraction."
+    }
+  ],
+  "opencv": {
+    "image_size": [
+      1800,
+      572
+    ],
+    "candidates": [
+      {
+        "bbox": [
+          0.0922,
+          0.5752,
+          0.3356,
+          0.8497
+        ],
+        "area_fraction": 0.02611,
+        "rect_fill_ratio": 0.195,
+        "min_area_rect": {
+          "center": [
+            0.2132,
+            0.682
+          ],
+          "size": [
+            0.0587,
+            0.7894
+          ],
+          "angle_deg": 77.7
+        },
+        "polygon": [
+          [
+            0.3344,
+            0.5787
+          ],
+          [
+            0.2967,
+            0.6136
+          ],
+          [
+            0.2906,
+            0.6766
+          ],
+          [
+            0.2644,
+            0.6818
+          ],
+          [
+            0.2589,
+            0.6451
+          ],
+          [
+            0.2533,
+            0.6783
+          ],
+          [
+            0.2406,
+            0.6381
+          ],
+          [
+            0.2372,
+            0.6906
+          ],
+          [
+            0.23,
+            0.6451
+          ],
+          [
+            0.2244,
+            0.7045
+          ],
+          [
+            0.2167,
+            0.6486
+          ],
+          [
+            0.1828,
+            0.6084
+          ],
+          [
+            0.1956,
+            0.7203
+          ],
+          [
+            0.1711,
+            0.7308
+          ],
+          [
+            0.1628,
+            0.6713
+          ],
+          [
+            0.1644,
+            0.7378
+          ],
+          [
+            0.1194,
+            0.7605
+          ],
+          [
+            0.1122,
+            0.7045
+          ],
+          [
+            0.0922,
+            0.7885
+          ],
+          [
+            0.1094,
+            0.8479
+          ],
+          [
+            0.125,
+            0.7885
+          ],
+          [
+            0.2317,
+            0.7308
+          ],
+          [
+            0.2389,
+            0.6941
+          ],
+          [
+            0.3028,
+            0.715
+          ]
+        ]
+      },
+      {
+        "bbox": [
+          0.3194,
+          0.6259,
+          0.3594,
+          0.6853
+        ],
+        "area_fraction": 0.0027,
+        "rect_fill_ratio": 0.567,
+        "min_area_rect": {
+          "center": [
+            0.3391,
+            0.6546
+          ],
+          "size": [
+            0.0181,
+            0.1244
+          ],
+          "angle_deg": 88.8
+        },
+        "polygon": [
+          [
+            0.3589,
+            0.6608
+          ],
+          [
+            0.3522,
+            0.6329
+          ],
+          [
+            0.3411,
+            0.6259
+          ],
+          [
+            0.335,
+            0.6329
+          ],
+          [
+            0.3289,
+            0.6503
+          ],
+          [
+            0.32,
+            0.6503
+          ],
+          [
+            0.3194,
+            0.6748
+          ],
+          [
+            0.3322,
+            0.6836
+          ],
+          [
+            0.3372,
+            0.6538
+          ],
+          [
+            0.3444,
+            0.6469
+          ],
+          [
+            0.345,
+            0.6713
+          ],
+          [
+            0.3472,
+            0.6818
+          ],
+          [
+            0.3578,
+            0.6818
+          ]
+        ]
+      },
+      {
+        "bbox": [
+          0.39,
+          0.3829,
+          0.4272,
+          0.4283
+        ],
+        "area_fraction": 0.00206,
+        "rect_fill_ratio": 0.61,
+        "min_area_rect": {
+          "center": [
+            0.4083,
+            0.4047
+          ],
+          "size": [
+            0.0139,
+            0.1154
+          ],
+          "angle_deg": 90.0
+        },
+        "polygon": [
+          [
+            0.39,
+            0.3916
+          ],
+          [
+            0.39,
+            0.4108
+          ],
+          [
+            0.3994,
+            0.4108
+          ],
+          [
+            0.4011,
+            0.4231
+          ],
+          [
+            0.4267,
+            0.4266
+          ],
+          [
+            0.4261,
+            0.4073
+          ],
+          [
+            0.4183,
+            0.4056
+          ],
+          [
+            0.4117,
+            0.3934
+          ],
+          [
+            0.41,
+            0.3829
+          ],
+          [
+            0.4,
+            0.3829
+          ],
+          [
+            0.3972,
+            0.3899
+          ]
+        ]
+      }
+    ],
+    "built_fraction": 0.0468
+  },
+  "layout": {
+    "panels": [
+      {
+        "panel_id": "p1",
+        "title": "Ground level master plan",
+        "bbox": [
+          0.02,
+          0.1,
+          0.48,
+          0.98
+        ],
+        "is_primary_for_towers": false
+      },
+      {
+        "panel_id": "p2",
+        "title": "Podium top master plan",
+        "bbox": [
+          0.51,
+          0.1,
+          0.98,
+          0.98
+        ],
+        "is_primary_for_towers": true
+      }
+    ],
+    "north": {
+      "visible": true,
+      "angle_deg_from_image_up": 90,
+      "confidence": "Medium"
+    },
+    "road_frontage": {
+      "side": "west",
+      "road_name": "R.A. Kidwai Marg/Char Rasta (West)"
+    },
+    "tower_count": 3,
+    "towers": [
+      {
+        "tower_id": "T1",
+        "label": "left tower (marker 29)",
+        "bbox": [
+          0.564,
+          0.41,
+          0.675,
+          0.58
+        ],
+        "shape": "irregular",
+        "long_axis_deg_from_image_up": 90,
+        "floors": null,
+        "height_m": null,
+        "confidence": "Medium"
+      },
+      {
+        "tower_id": "T2",
+        "label": "middle tower (marker 28)",
+        "bbox": [
+          0.697,
+          0.38,
+          0.811,
+          0.52
+        ],
+        "shape": "irregular",
+        "long_axis_deg_from_image_up": 90,
+        "floors": null,
+        "height_m": null,
+        "confidence": "Medium"
+      },
+      {
+        "tower_id": "T3",
+        "label": "right tower",
+        "bbox": [
+          0.828,
+          0.35,
+          0.953,
+          0.51
+        ],
+        "shape": "irregular",
+        "long_axis_deg_from_image_up": 90,
+        "floors": null,
+        "height_m": null,
+        "confidence": "Medium"
+      }
+    ],
+    "podium": {
+      "present": true,
+      "levels": null,
+      "covers_towers": true,
+      "notes": "The podium top plan shows a landscaped deck with a pool, a futsal court, lawns and an outdoor gym. The towers rise from this deck along the road side. The ground level shows a driveway, the MLCP exit and entry, and a parking row below the podium. The number of podium levels is not stated."
+    },
+    "entries": [
+      {
+        "label": "Entry/ Exit (to Dadar Five Gardens)",
+        "side": "west"
+      },
+      {
+        "label": "Entry to Lobby Area",
+        "side": "west"
+      },
+      {
+        "label": "Exit from MLCP / Exit to MLCP",
+        "side": "west"
+      }
+    ],
+    "legend_items": [
+      {
+        "code": "1",
+        "label": "Entry/ Exit",
+        "panel": "p1"
+      },
+      {
+        "code": "2",
+        "label": "Ramp Walkway",
+        "panel": "p1"
+      },
+      {
+        "code": "3",
+        "label": "Driveway",
+        "panel": "p1"
+      },
+      {
+        "code": "4",
+        "label": "Exit from MLCP",
+        "panel": "p1"
+      },
+      {
+        "code": "5",
+        "label": "Exit to MLCP",
+        "panel": "p1"
+      },
+      {
+        "code": "6",
+        "label": "Entry to Lobby Area",
+        "panel": "p1"
+      },
+      {
+        "code": "7",
+        "label": "Double Height Plaza",
+        "panel": "p1"
+      },
+      {
+        "code": "8",
+        "label": "Bench Seating",
+        "panel": "p1"
+      },
+      {
+        "code": "9",
+        "label": "Active Street",
+        "panel": "p1"
+      },
+      {
+        "code": "10",
+        "label": "Emergency Driveway",
+        "panel": "p1"
+      },
+      {
+        "code": "11",
+        "label": "Pedestrian Walkway",
+        "panel": "p1"
+      },
+      {
+        "code": "12",
+        "label": "Skating Track",
+        "panel": "p1"
+      },
+      {
+        "code": "13",
+        "label": "Car Wash",
+        "panel": "p1"
+      },
+      {
+        "code": "1",
+        "label": "Connecting corridor from Tower",
+        "panel": "p2"
+      },
+      {
+        "code": "2",
+        "label": "Pool Deck",
+        "panel": "p2"
+      },
+      {
+        "code": "3",
+        "label": "Changing Room",
+        "panel": "p2"
+      },
+      {
+        "code": "4",
+        "label": "Family Pergola",
+        "panel": "p2"
+      },
+      {
+        "code": "5",
+        "label": "Jacuzzi",
+        "panel": "p2"
+      },
+      {
+        "code": "6",
+        "label": "Semi Olympic pool with Infinity edge",
+        "panel": "p2"
+      },
+      {
+        "code": "7",
+        "label": "Kids Pool",
+        "panel": "p2"
+      },
+      {
+        "code": "8",
+        "label": "Pool Lounge",
+        "panel": "p2"
+      },
+      {
+        "code": "9",
+        "label": "Promenade",
+        "panel": "p2"
+      },
+      {
+        "code": "10",
+        "label": "Futsal Court",
+        "panel": "p2"
+      },
+      {
+        "code": "11",
+        "label": "Seating for Futsal Court",
+        "panel": "p2"
+      },
+      {
+        "code": "12",
+        "label": "Kids Play Area",
+        "panel": "p2"
+      },
+      {
+        "code": "13",
+        "label": "Climbing Wall",
+        "panel": "p2"
+      },
+      {
+        "code": "14",
+        "label": "Senior Citizens Seating with people",
+        "panel": "p2"
+      },
+      {
+        "code": "15",
+        "label": "Amphitheatre seating",
+        "panel": "p2"
+      },
+      {
+        "code": "16",
+        "label": "Party area with Screen",
+        "panel": "p2"
+      },
+      {
+        "code": "17",
+        "label": "Screen Wall",
+        "panel": "p2"
+      },
+      {
+        "code": "18",
+        "label": "Outdoor Gym",
+        "panel": "p2"
+      },
+      {
+        "code": "19",
+        "label": "Seating below Palm Tree",
+        "panel": "p2"
+      },
+      {
+        "code": "20",
+        "label": "Palm Plaza with Board Games",
+        "panel": "p2"
+      },
+      {
+        "code": "21",
+        "label": "Multipurpose Lawn",
+        "panel": "p2"
+      },
+      {
+        "code": "22",
+        "label": "Mini Golf",
+        "panel": "p2"
+      },
+      {
+        "code": "23",
+        "label": "Reflexology Pathway",
+        "panel": "p2"
+      },
+      {
+        "code": "24",
+        "label": "Nature Walk",
+        "panel": "p2"
+      },
+      {
+        "code": "25",
+        "label": "Outdoor working stations",
+        "panel": "p2"
+      },
+      {
+        "code": "26",
+        "label": "Herb Garden",
+        "panel": "p2"
+      },
+      {
+        "code": "27",
+        "label": "Yoga Lawn",
+        "panel": "p2"
+      },
+      {
+        "code": "28",
+        "label": "Meditation Deck",
+        "panel": "p2"
+      },
+      {
+        "code": "29",
+        "label": "Future Devlopment",
+        "panel": "p2"
+      }
+    ],
+    "scale": {
+      "visible": false,
+      "notes": "There is no scale bar and no dimensions are shown."
+    },
+    "warnings": [
+      "The plan is an illustrative, stylized rendering and is not to scale.",
+      "The compass 'N' label points to image right, so north is about 90°. Image left-to-right is roughly south-to-north, and the road at the top is on the west side. Towers are ordered left to right as instructed, which is not west to east.",
+      "Markers 28 and 29 sit on the two left tower outlines in the podium plan. The legend lists them as 'Meditation Deck' and 'Future Devlopment', so the left tower (29) may be a future-development block.",
+      "Tower bboxes are approximate. The ground-level panel shows the same three blocks less distinctly at about [0.072,0.51,0.178,0.68], [0.192,0.44,0.319,0.60] and [0.33,0.43,0.45,0.60].",
+      "The provided opencv candidate blocks do not align with the tower footprints. They mostly capture parking and landscape areas in the ground panel."
+    ],
+    "notes": [
+      "Three tower outlines were identified, matching the declared tower count of 3.",
+      "No floor counts or heights are written on the plan.",
+      "The second image is a cropped duplicate of the bottom portion of the same plan, showing the legends."
+    ],
+    "_model": "claude-opus-5-5"
+  },
+  "vision": {
+    "provider": "claude",
+    "model": "claude-opus-5-5",
+    "error": null
+  },
+  "georeferenced_towers": [
+    {
+      "name": "left tower (marker 29)",
+      "floors": null,
+      "heightM": null,
+      "footprint": [
+        [
+          [
+            72.856012,
+            19.013185
+          ],
+          [
+            72.856012,
+            19.013439
+          ],
+          [
+            72.856232,
+            19.013439
+          ],
+          [
+            72.856232,
+            19.013185
+          ],
+          [
+            72.856012,
+            19.013185
+          ]
+        ]
+      ],
+      "headingDeg": 180.0,
+      "shape": "irregular",
+      "confidence": "Medium",
+      "source": "masterplan_analysis",
+      "note": "footprint georeferenced from the master plan onto the plot bbox; approximate"
+    },
+    {
+      "name": "middle tower (marker 28)",
+      "floors": null,
+      "heightM": null,
+      "footprint": [
+        [
+          [
+            72.855973,
+            19.01349
+          ],
+          [
+            72.855973,
+            19.013751
+          ],
+          [
+            72.856154,
+            19.013751
+          ],
+          [
+            72.856154,
+            19.01349
+          ],
+          [
+            72.855973,
+            19.01349
+          ]
+        ]
+      ],
+      "headingDeg": 180.0,
+      "shape": "irregular",
+      "confidence": "Medium",
+      "source": "masterplan_analysis",
+      "note": "footprint georeferenced from the master plan onto the plot bbox; approximate"
+    },
+    {
+      "name": "right tower",
+      "floors": null,
+      "heightM": null,
+      "footprint": [
+        [
+          [
+            72.855934,
+            19.01379
+          ],
+          [
+            72.855934,
+            19.014077
+          ],
+          [
+            72.856141,
+            19.014077
+          ],
+          [
+            72.856141,
+            19.01379
+          ],
+          [
+            72.855934,
+            19.01379
+          ]
+        ]
+      ],
+      "headingDeg": 180.0,
+      "shape": "irregular",
+      "confidence": "Medium",
+      "source": "masterplan_analysis",
+      "note": "footprint georeferenced from the master plan onto the plot bbox; approximate"
+    }
+  ],
+  "plot_is_placeholder": true
+}

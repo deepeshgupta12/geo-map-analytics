@@ -38,8 +38,16 @@ export const SRC = {
   roads: "roads-src",
   projects: "projects-src",
   labels: "labels-src", // GeoJSON (computed centroids)
+  counts: "counts-src", // GeoJSON (project counts at polygon centroids)
   dem: "mapbox-dem",
 } as const;
+
+// Project count bubbles (reference look: orange disc, white number).
+export const BUBBLE = {
+  fill: "#f97316",
+  stroke: "#ffffff",
+  text: "#ffffff",
+};
 
 export const LYR = {
   cityOutline: "city-outline",
@@ -72,6 +80,12 @@ export const LYR = {
 
   mmLabels: "mm-labels",
   locLabels: "loc-labels",
+
+  // Project count bubbles (circle + number) per micromarket and per locality.
+  countMm: "count-mm",
+  countMmText: "count-mm-text",
+  countLoc: "count-loc",
+  countLocText: "count-loc-text",
 
   // Invisible hit layers for hover / click.
   hitCity: "city-hit",

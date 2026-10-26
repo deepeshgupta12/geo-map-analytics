@@ -1,0 +1,11 @@
+# Python deps for scripts/analyze_master_plan.py
+# (the Green Open Area Intelligence engine modules it imports need the same stack)
+#   python3 -m venv .venv && .venv/bin/pip install -r scripts/requirements.txt
+anthropic>=0.80
+google-genai>=1.0.0
+opencv-python==4.10.0.84
+numpy>=2.0
+pillow>=11.0
+pydantic>=2.10
+pydantic-settings>=2.7
+python-dotenv>=1.0

@@ -183,6 +183,20 @@ type MetricsDoc = {
 
 `carryForward()` derives a filled document where a missing month reuses the latest earlier value and tags it with `asOf`.
 
+### Project inputs and master plan analysis
+
+Each project that gets a 3D rendering has a folder under `public/projects/<slug>/` (listed in `public/projects/index.json`) with `project.json`, the developer master plan, exterior photos and, when available, a GLB model. The template fields are documented in the folder's README (first project: `godrej-horizon-wadala`).
+
+`scripts/analyze_master_plan.py` reads the master plan **with code**, reusing the Green Open Area Intelligence engine (image preprocessing, plan/legend crops, OpenCV built-structure mask, JSON-only vision prompting) and adding a building-layout step: tower count and per-tower footprints, podium, north-arrow angle and road frontage. Footprints are georeferenced onto the plot polygon and written back into `project.json` (`towers[]`, `layout`, `masterPlan.analysis`). The vision step uses the Claude API (`ANTHROPIC_API_KEY` in `.env.local`) and falls back to the engine's Gemini key, then to OpenCV only.
+
+```bash
+python3 -m venv .venv && .venv/bin/pip install -r scripts/requirements.txt
+GOA_ENGINE_DIR=~/green-open-area-intelligence \
+  .venv/bin/python scripts/analyze_master_plan.py public/projects/godrej-horizon-wadala --overwrite
+```
+
+Outputs land in `public/projects/<slug>/analysis/` (JSON is committed, derived images are not).
+
 ### Zoom bands (`src/config/layers.ts`)
 
 | Constant | Value | Meaning |

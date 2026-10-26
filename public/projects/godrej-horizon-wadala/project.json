@@ -1,0 +1,207 @@
+{
+  "slug": "godrej-horizon-wadala",
+  "name": "Godrej Horizon Wadala",
+  "developer": "Godrej Properties",
+  "status": "Under Construction",
+  "ids": {
+    "project": 147340,
+    "locality": 907,
+    "micromarket": 100
+  },
+  "locality": "Wadala",
+  "micromarket": "Mumbai South",
+  "location": {
+    "lng": 72.85618,
+    "lat": 19.0136,
+    "source": "projects tileset point"
+  },
+  "plot": {
+    "type": "Polygon",
+    "coordinates": [
+      [
+        [
+          72.85561,
+          19.013061
+        ],
+        [
+          72.85675,
+          19.013061
+        ],
+        [
+          72.85675,
+          19.014139
+        ],
+        [
+          72.85561,
+          19.014139
+        ],
+        [
+          72.85561,
+          19.013061
+        ]
+      ]
+    ],
+    "placeholder": true,
+    "note": "120 m square around the point. The master plan shows an elongated plot running roughly east-west along R.A. Kidwai Marg (road on the north side); replace with the real plot boundary (GeoJSON Polygon, lng/lat)."
+  },
+  "towerCount": 3,
+  "floors": null,
+  "units": null,
+  "podiumLevels": null,
+  "layout": {
+    "source": "scripts/analyze_master_plan.py (Green Open Area Intelligence engine + claude:claude-opus-5-5)",
+    "description": "Three tower outlines were identified, matching the declared tower count of 3. No floor counts or heights are written on the plan. The second image is a cropped duplicate of the bottom portion of the same plan, showing the legends. The podium top plan shows a landscaped deck with a pool, a futsal court, lawns and an outdoor gym. The towers rise from this deck along the road side. The ground level shows a driveway, the MLCP exit and entry, and a parking row below the podium. The number of podium levels is not stated.",
+    "roadSide": "west",
+    "northDeg": 90,
+    "warnings": [
+      "The plan is an illustrative, stylized rendering and is not to scale.",
+      "The compass 'N' label points to image right, so north is about 90°. Image left-to-right is roughly south-to-north, and the road at the top is on the west side. Towers are ordered left to right as instructed, which is not west to east.",
+      "Markers 28 and 29 sit on the two left tower outlines in the podium plan. The legend lists them as 'Meditation Deck' and 'Future Devlopment', so the left tower (29) may be a future-development block.",
+      "Tower bboxes are approximate. The ground-level panel shows the same three blocks less distinctly at about [0.072,0.51,0.178,0.68], [0.192,0.44,0.319,0.60] and [0.33,0.43,0.45,0.60].",
+      "The provided opencv candidate blocks do not align with the tower footprints. They mostly capture parking and landscape areas in the ground panel."
+    ]
+  },
+  "towers": [
+    {
+      "name": "left tower (marker 29)",
+      "floors": null,
+      "heightM": null,
+      "footprint": [
+        [
+          [
+            72.856012,
+            19.013185
+          ],
+          [
+            72.856012,
+            19.013439
+          ],
+          [
+            72.856232,
+            19.013439
+          ],
+          [
+            72.856232,
+            19.013185
+          ],
+          [
+            72.856012,
+            19.013185
+          ]
+        ]
+      ],
+      "headingDeg": 180.0,
+      "shape": "irregular",
+      "confidence": "Medium",
+      "source": "masterplan_analysis",
+      "note": "footprint georeferenced from the master plan onto the plot bbox; approximate"
+    },
+    {
+      "name": "middle tower (marker 28)",
+      "floors": null,
+      "heightM": null,
+      "footprint": [
+        [
+          [
+            72.855973,
+            19.01349
+          ],
+          [
+            72.855973,
+            19.013751
+          ],
+          [
+            72.856154,
+            19.013751
+          ],
+          [
+            72.856154,
+            19.01349
+          ],
+          [
+            72.855973,
+            19.01349
+          ]
+        ]
+      ],
+      "headingDeg": 180.0,
+      "shape": "irregular",
+      "confidence": "Medium",
+      "source": "masterplan_analysis",
+      "note": "footprint georeferenced from the master plan onto the plot bbox; approximate"
+    },
+    {
+      "name": "right tower",
+      "floors": null,
+      "heightM": null,
+      "footprint": [
+        [
+          [
+            72.855934,
+            19.01379
+          ],
+          [
+            72.855934,
+            19.014077
+          ],
+          [
+            72.856141,
+            19.014077
+          ],
+          [
+            72.856141,
+            19.01379
+          ],
+          [
+            72.855934,
+            19.01379
+          ]
+        ]
+      ],
+      "headingDeg": 180.0,
+      "shape": "irregular",
+      "confidence": "Medium",
+      "source": "masterplan_analysis",
+      "note": "footprint georeferenced from the master plan onto the plot bbox; approximate"
+    }
+  ],
+  "facade": {
+    "base": "#f4f1ea",
+    "accent": "#c9743a",
+    "glass": "#8fb3c9",
+    "note": "white facade with terracotta balcony bands and vertical accent strips; taken from images/exterior-1.jpg"
+  },
+  "masterPlan": {
+    "image": "masterplan.jpg",
+    "attached": true,
+    "analysis": "analysis/masterplan_analysis.json"
+  },
+  "model": {
+    "file": "model.glb",
+    "attached": false,
+    "units": "metres",
+    "scale": 1,
+    "headingDeg": 0,
+    "anchor": "plotCentroid",
+    "elevationM": 0,
+    "note": "GLB (glTF binary) with Y up and metres as units. If no developer model exists, a procedural model is generated from towers[] + facade."
+  },
+  "card": {
+    "image": "images/exterior-1.jpg",
+    "images": [
+      "images/exterior-1.jpg",
+      "images/exterior-2.jpg"
+    ],
+    "priceRange": null,
+    "pricePsf": null,
+    "configurations": [],
+    "rera": null,
+    "url": null,
+    "note": "priceRange e.g. \"₹2.1 Cr – ₹5.4 Cr\"; configurations e.g. [\"2 BHK\", \"3 BHK\"]"
+  },
+  "attachments": [
+    "masterplan.jpg",
+    "images/exterior-1.jpg",
+    "images/exterior-2.jpg"
+  ]
+}
