@@ -99,16 +99,18 @@ export class FeatureIndex {
   }
 
   /**
-   * Decide which micromarket each locality belongs to: spatially (its centroid inside
-   * the micromarket polygon) when geometry is known, otherwise via `fallback`.
+   * Decide which micromarket each locality belongs to. The dimension table
+   * (`table`, the business assignment) wins; the micromarket polygon containing the
+   * locality centroid is only used for localities the table does not know.
    * Returns true if any assignment changed.
    */
-  assignMicromarkets(fallback: (id: number) => number | null): boolean {
+  assignMicromarkets(table: (id: number) => number | null): boolean {
     let changed = false;
     for (const e of this.entries.values()) {
       if (e.level !== "localities") continue;
-      const spatial = this.mmRings.size ? this.mmIdForPoint(e.cx, e.cy) : null;
-      const mmId = spatial ?? fallback(e.id) ?? e.mmId;
+      const fromTable = table(e.id);
+      const spatial = fromTable === null && this.mmRings.size ? this.mmIdForPoint(e.cx, e.cy) : null;
+      const mmId = fromTable ?? spatial ?? e.mmId;
       if (mmId !== e.mmId) {
         e.mmId = mmId;
         changed = true;

@@ -43,7 +43,7 @@ Dashboards are slow for spatial exploration and GIS suites are overkill for sale
 - Below **z12** the four micromarkets are painted. From **z12** the localities of the *focused* micromarket appear and the other micromarkets are dimmed. From **z14** the project dots of the *focused* locality appear.
 - Focus follows where you are looking: the cursor position when the pointer is over the map (wheel zoom anchors there), otherwise the screen centre. Clicking a polygon flies into it (centred on its centroid, straight into the next band) and keeps it focused until you move the map yourself.
 - Breadcrumb in the top-left (city › micromarket › locality, with the project count in view) and the drill-down panel show the current focus. The restriction toggles can be switched off to see every locality or every project at that zoom.
-- Locality membership is decided **spatially** (centroid inside the micromarket polygon) with the dimension table as fallback, so a locality is never hidden because of a mismatched id.
+- Locality membership follows the **dimension table** (the business assignment, e.g. Wadala is in Mumbai South); the micromarket polygon containing the locality centroid is only used for localities the table does not know. The focus follows the same rule: the locality under the cursor names the focused micromarket, so a locality is never hidden by a drawn boundary that disagrees with the table.
 
 ### Choropleth and timeline
 - Metrics: asking ₹/sqft, rent ₹/sqft, rent ₹/month, at micromarket or locality level (auto by zoom, or forced).

@@ -860,11 +860,22 @@ export default function MapView() {
           let locName = prev.locName;
 
           if (z >= Z_LOC - Z_FADE) {
-            const f = map.queryRenderedFeatures(probe, { layers: [LYR.hitMm] })[0] as RenderedFeature | undefined;
-            const id = toNumericId(f?.id);
-            if (f && id !== null) {
-              mmId = id;
-              mmName = getStrProp(f.properties, "MicroMarketName") || `Micromarket ${id}`;
+            // Table wins: the locality under the probe names its micromarket (dimension
+            // table); the micromarket polygon under the probe is only the fallback.
+            const { locMmById, mmById } = latest.current;
+            const lf = map.queryRenderedFeatures(probe, { layers: [LYR.hitLoc] })[0] as RenderedFeature | undefined;
+            const lid = toNumericId(lf?.id);
+            const tableMm = lid !== null ? locMmById.get(lid) : undefined;
+            if (tableMm !== undefined) {
+              mmId = tableMm;
+              mmName = mmById.get(tableMm)?.name ?? `Micromarket ${tableMm}`;
+            } else {
+              const f = map.queryRenderedFeatures(probe, { layers: [LYR.hitMm] })[0] as RenderedFeature | undefined;
+              const id = toNumericId(f?.id);
+              if (f && id !== null) {
+                mmId = id;
+                mmName = getStrProp(f.properties, "MicroMarketName") || `Micromarket ${id}`;
+              }
             }
           } else {
             mmId = null;
