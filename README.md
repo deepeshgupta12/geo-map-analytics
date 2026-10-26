@@ -63,7 +63,8 @@ Dashboards are slow for spatial exploration and GIS suites are overkill for sale
 - Clicking a project dot centres on it and starts a slow orbit, one turn per minute, with the buildings anchored to the ground. Any wheel, drag, touch, Esc or the Stop button ends it. The 3D project renderings will use the same entry point.
 
 ### 3D project renderings and project card
-- Projects with a folder under `public/projects/` are rendered in 3D from z13: a podium on the plot and one twin-wing (H-shaped) block per current tower, heights from the floor counts, with a thin balcony slab at every floor in the facade accent colour. The facade is geometry rather than a texture, because patterned extrusions ignore emissive lighting and go black at night; emissive strength is set per light preset so the towers read under day, dusk and night. Blocks flagged `futureDevelopment` are never extruded.
+- Projects with a folder under `public/projects/` are rendered in 3D from z13: a podium on the plot (fill-extrusion) and one **textured twin-wing (H-shaped) tower** per current tower, heights from the floor counts. Each tower is a binary glTF built in the browser from `project.json` and drawn by a Mapbox **`model` layer**: the facade texture (piers, floor-to-ceiling glass with mullions, glass balustrade, terracotta balcony band, accent strip) is painted on a canvas from the facade colours, and a second, emissive texture lights a random set of windows. The day preset uses the plain variant lit by the sun with cast shadows; dusk and night switch to the lit-windows variant and raise `model-emissive-strength` so the facade stays readable. Blocks flagged `futureDevelopment` are never built.
+- Why a model and not a patterned extrusion: Mapbox lights a patterned fill-extrusion with the scene light only (no emissive term in that shader), so a textured wall goes black at night. The model shader keeps the glTF emissive map and blends lit/unlit colour per preset.
 - Clicking a rendered building opens the project card (photo, price range, ₹/sqft, configurations, size range, units, towers and floors, status, possession, locality and micromarket, RERA ids) and starts the slow orbit around the plot. Escape or the card's buttons close it. The project's plain dot is hidden while its rendering exists.
 - Inputs come from `project.json` (see `public/projects/godrej-horizon-wadala/README.md`), with towers, orientation and podium read from the developer master plan by `scripts/analyze_master_plan.py`.
 
@@ -88,7 +89,7 @@ Dashboards are slow for spatial exploration and GIS suites are overkill for sale
 ## Tech stack
 
 - **Next.js 16** (App Router, Turbopack, React Compiler) · **React 19** · **TypeScript**
-- **Mapbox GL JS 3.18** with the **Mapbox Standard** style (slots, light presets, 3D objects, emissive paint, feature-state, heatmap, fill-extrusion)
+- **Mapbox GL JS 3.18** with the **Mapbox Standard** style (slots, light presets, 3D objects, emissive paint, feature-state, heatmap, fill-extrusion, `model` layer with runtime-built glTF, `symbol-z-offset` rooftop labels)
 - **Mapbox vector tilesets** for city, micromarkets, localities, roads and projects
 - Static JSON under `public/` for dimensions, metrics and project counts (no server)
 - ESLint 9
@@ -114,6 +115,9 @@ src/
     carryForward.ts                        # fills sparse months with the latest earlier value
     quantiles.ts                           # quantile stops, bucket ranges, value collection
     projects.ts                            # per-project input spec (plot, towers, model, card) + loader
+    projectGeometry.ts                     # podium, future outlines, rooftop label point, H footprint helper
+    towerModel.ts                          # textured glTF towers built in the browser for the model layer
+    bubbleSprite.ts                        # stretchable disc sprite for the count bubbles
     export.ts, types.ts
 scripts/
   build_dims_public.py                     # public/dim/*.json from data/raw
@@ -126,7 +130,8 @@ public/
   dim/      localities, micromarkets, project counts
   metrics/  <metric>_<level>.json
   projects/ index.json + one folder per 3D project (project.json, master plan, photos, analysis/)
-docs/images/                               # screenshots used above
+docs/screenshots/                          # feature screenshots (see docs/FEATURES.md for the integration behind each)
+docs/images/                               # earlier screenshots used in the version history
 ```
 
 ---
@@ -233,6 +238,7 @@ Outputs land in `public/projects/<slug>/analysis/` (JSON is committed, derived i
 - **Standard style slots and emissive paint.** Data layers sit in the `middle` and `top` slots so basemap labels stay readable and 3D buildings rise through the choropleth; emissive strength keeps colours vivid under the night light.
 - **Join robustness.** Canonical names by feature id, normalised fallback, spatial membership and carry-forward together lifted locality coverage in a micromarket from ~16% to ~58% of polygons.
 - **Dev tooling.** Turbopack is pinned to the project root (`turbopack.root`) because a stray lockfile in the home directory made it pick the wrong root and serve stale chunks.
+- **Model layer details.** All towers of a project are anchored at the plot centroid with the offset baked into the mesh, so `model-allow-density-reduction` must be off (Mapbox otherwise keeps one model per lookup cell and the other towers vanish). The rooftop label uses `symbol-z-offset` from the tallest tower's height rather than `symbol-z-elevate`, which only follows fill-extrusions. Blob URLs for the GLBs are cached across style reloads because a reload empties the model registry.
 
 ### Verification approach
 
@@ -250,12 +256,13 @@ Headless Chrome is driven over the DevTools protocol (no extra packages): the dr
 - **V4.1** night default survives stale URLs, playback follows zoom, spatial membership, canonical-name joins, carry-forward, cyan hover highlight that survives camera moves, click-to-zoom into the next band with sticky focus, cursor-based focus, per-locality project counts script.
 - **V4.2** project count bubbles per micromarket and locality with click-to-zoom, slow orbit around a clicked project, performance mode, lighter rendering (no antialiasing, no preserved drawing buffer, PNG export via render callback), per-project input folders, and `scripts/analyze_master_plan.py` which reads a developer master plan with the Green Open Area Intelligence engine plus the Claude API and writes towers, footprints, podium and orientation into `project.json`. First project folder: Godrej Horizon Wadala.
 - **V4.3** procedural 3D rendering of Godrej Horizon Wadala (podium, three twin-wing towers of 47/47/42 floors with per-floor balcony slabs, future-development block excluded) lit per light preset; project card with photo, price, configurations, units, towers, status, possession and RERA, opened by clicking the building together with the orbit; count bubbles rebuilt as single fitted symbols so the number is always centred, locality bubbles shown only inside the focused micromarket from z12.
+- **V4.4** textured towers: each tower is a glTF built in the browser (facade texture + emissive window map) and drawn by a Mapbox `model` layer, so the textures are visible under day, dusk and night; rooftop label via `symbol-z-offset`; locality membership follows the dimension table ("table wins"); `docs/FEATURES.md` and `docs/screenshots/` (one line per feature on the integration behind it).
 
 ---
 
 ## Roadmap
 
-- More projects in `public/projects/` (the second and third), each through the same master plan analysis; a GLB model layer for projects where the developer supplies one; real plot boundaries replacing the placeholder squares.
+- More projects in `public/projects/` (the second and third), each through the same master plan analysis; developer-supplied GLBs can replace the generated towers on the same model layer; real plot boundaries replacing the placeholder squares (and hiding the basemap's own buildings inside the plot).
 - Mobile tuning after the 3D work.
 - Multi-city support: city switcher, per-city tilesets, dims and metrics.
 - Export polish: legend and title overlay on PNG, richer CSV.

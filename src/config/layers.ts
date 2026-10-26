@@ -39,7 +39,8 @@ export const SRC = {
   projects: "projects-src",
   labels: "labels-src", // GeoJSON (computed centroids)
   counts: "counts-src", // GeoJSON (project counts at polygon centroids)
-  projects3d: "projects3d-src", // GeoJSON (procedural podium + towers per project folder)
+  projects3d: "projects3d-src", // GeoJSON (procedural podium, future outlines, rooftop label per project folder)
+  projectsModel: "projects-model-src", // GeoJSON points driving the glTF tower models
   dem: "mapbox-dem",
 } as const;
 
@@ -88,8 +89,7 @@ export const LYR = {
 
   // Procedural 3D project renderings (podium + towers from public/projects/<slug>).
   projectPodium: "project-podium",
-  projectTowers: "project-towers",
-  projectSlabs: "project-slabs",
+  projectModel: "project-towers-model", // Mapbox `model` layer: textured glTF towers built in the browser
   projectFuture: "project-future",
   projectLabel: "project-label",
 

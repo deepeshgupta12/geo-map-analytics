@@ -1,7 +1,9 @@
 // src/lib/projectGeometry.ts
-// Procedural 3D geometry for a project: a podium on the plot plus one extruded
-// twin-wing (H-shaped) block per current tower, with a generated facade pattern.
-// Future-development entries are never extruded.
+// Procedural ground geometry for a project: the podium on the plot, dashed
+// outlines for future development and the rooftop label point. The towers
+// themselves are textured glTF models (see lib/towerModel.ts) that share the
+// twin-wing (H-shaped) footprint helper below. Future-development entries are
+// never extruded.
 
 import type { LoadedProject, LngLat, TowerSpec } from "@/lib/projects";
 import { plotCentroid } from "@/lib/projects";
@@ -64,27 +66,19 @@ export function towerHeightM(t: TowerSpec): number {
   return (t.floors ?? DEFAULT_FLOORS) * FLOOR_HEIGHT_M;
 }
 
-export type Project3DKind = "podium" | "tower" | "slab" | "future" | "label";
+export type Project3DKind = "podium" | "future" | "label";
 
 export const TOWER_INSET = 0.7;
-const SLAB_THICKNESS_M = 0.4;
-const SLAB_OVERHANG = 1.05; // slab outline scale vs the body (about 0.5 m on a 25 m wing)
-
-export function facadeImageId(slug: string) {
-  return `facade-${slug}`;
-}
 
 /**
- * GeoJSON features for one project: podium, one body per current tower, a thin
- * balcony slab per floor (the facade "texture" is geometry, because patterned
- * extrusions ignore emissive lighting and go black at night), future outlines
- * and a rooftop label.
+ * GeoJSON features for one project: the podium, dashed future-development
+ * outlines and a rooftop label point carrying the tallest tower's top (metres)
+ * for `symbol-z-offset`. Tower bodies come from lib/towerModel.ts.
  */
 export function buildProject3D(p: LoadedProject): GeoJSON.Feature[] {
   const features: GeoJSON.Feature[] = [];
   const slug = p.slug;
   const projectId = p.ids?.project ?? null;
-  const facade = p.facade ?? { base: "#f4f1ea", accent: "#c9743a", glass: "#8fb3c9" };
   const podiumH = Math.max(0, (p.podiumLevels ?? 0) * PODIUM_LEVEL_M);
 
   const plotRing = p.plot?.coordinates?.[0];
@@ -108,38 +102,7 @@ export function buildProject3D(p: LoadedProject): GeoJSON.Feature[] {
       });
       continue;
     }
-    const shape = (t.shape ?? "H").toUpperCase();
-    const body = shape === "H" ? hFootprint(ring, 0.38, 0.6, TOWER_INSET) : ring;
-    const slabRing = shape === "H" ? hFootprint(ring, 0.38, 0.6, TOWER_INSET * SLAB_OVERHANG) : ring;
-    const floors = Math.max(1, Math.round(t.floors ?? towerHeightM(t) / FLOOR_HEIGHT_M));
-    const top = podiumH + towerHeightM(t);
-    maxTop = Math.max(maxTop, top);
-    features.push({
-      type: "Feature",
-      geometry: { type: "Polygon", coordinates: [body] },
-      properties: {
-        kind: "tower",
-        slug,
-        projectId,
-        name: t.name,
-        phase: t.phase ?? null,
-        floors: t.floors ?? null,
-        height: top,
-        base: podiumH,
-        color: facade.glass,
-      },
-    });
-    // One thin balcony slab per floor in the accent colour: reads as the facade's
-    // horizontal banding from every angle and under every light preset.
-    const floorH = (top - podiumH) / floors;
-    for (let i = 1; i <= floors; i++) {
-      const slabTop = podiumH + i * floorH;
-      features.push({
-        type: "Feature",
-        geometry: { type: "Polygon", coordinates: [slabRing] },
-        properties: { kind: "slab", slug, projectId, name: t.name, height: slabTop, base: slabTop - SLAB_THICKNESS_M, color: facade.accent },
-      });
-    }
+    maxTop = Math.max(maxTop, podiumH + towerHeightM(t));
   }
 
   for (const f of p.futureDevelopment ?? []) {
@@ -159,37 +122,4 @@ export function buildProject3D(p: LoadedProject): GeoJSON.Feature[] {
     properties: { kind: "label", slug, projectId, name: p.name, top: maxTop },
   });
   return features;
-}
-
-function hexToRgb(hex: string): [number, number, number] {
-  const h = hex.replace("#", "");
-  const n = parseInt(h.length === 3 ? h.split("").map((c) => c + c).join("") : h, 16);
-  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
-}
-
-/**
- * Small RGBA tile for `fill-extrusion-pattern`: a glass window band with mullions
- * over the base colour, and an accent balcony slab. Tiles across the walls.
- */
-export function facadeTile(colors: { base: string; accent: string; glass: string }, size = 16): { width: number; height: number; data: Uint8Array } {
-  const base = hexToRgb(colors.base);
-  const accent = hexToRgb(colors.accent);
-  const glass = hexToRgb(colors.glass);
-  const data = new Uint8Array(size * size * 4);
-  for (let y = 0; y < size; y++) {
-    for (let x = 0; x < size; x++) {
-      let c = base;
-      const inWindow = y >= 2 && y < 9;
-      const mullion = x % 4 === 0;
-      const slab = y >= 11 && y < 13;
-      if (inWindow && !mullion) c = glass;
-      else if (slab) c = accent;
-      const i = (y * size + x) * 4;
-      data[i] = c[0];
-      data[i + 1] = c[1];
-      data[i + 2] = c[2];
-      data[i + 3] = 255;
-    }
-  }
-  return { width: size, height: size, data };
 }

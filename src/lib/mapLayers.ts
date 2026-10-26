@@ -73,6 +73,24 @@ export function addDataSources(map: Map) {
       data: { type: "FeatureCollection", features: [] },
     });
   }
+  if (!map.getSource(SRC.projectsModel)) {
+    map.addSource(SRC.projectsModel, {
+      type: "geojson",
+      data: { type: "FeatureCollection", features: [] },
+    });
+  }
+}
+
+/** `model-id` for the tower layer: the GeoJSON `model` key plus the preset's variant. */
+export function towerModelIdExpr(preset: LightPreset): ExpressionSpecification {
+  return ["concat", ["get", "model"], ":", isDarkPreset(preset) ? "night" : "day"];
+}
+
+/** How much of the tower's own (unlit) colour shows: sunlit by day, self-lit after dusk. */
+export function towerEmissiveFor(preset: LightPreset): number {
+  if (preset === "night") return 0.45;
+  if (preset === "dusk") return 0.3;
+  return 0;
 }
 
 export function addDataLayers(map: Map, preset: LightPreset) {
@@ -395,44 +413,29 @@ export function addDataLayers(map: Map, preset: LightPreset) {
       "fill-extrusion-opacity-transition": noTransition,
     },
   });
+  // Towers: textured glTF models built in the browser (lib/towerModel.ts). The
+  // facade texture is lit by the sun in day/dawn; after dusk the night variant
+  // adds an emissive window map and `model-emissive-strength` keeps the facade
+  // colours visible.
   map.addLayer({
-    id: LYR.projectTowers,
-    type: "fill-extrusion",
-    source: SRC.projects3d,
+    id: LYR.projectModel,
+    type: "model",
+    source: SRC.projectsModel,
     slot: SLOT.lines,
-    filter: ["==", ["get", "kind"], "tower"],
     minzoom: Z_PROJ - 1,
-    paint: {
-      "fill-extrusion-color": ["get", "color"],
-      "fill-extrusion-height": ["get", "height"],
-      "fill-extrusion-base": ["get", "base"],
-      "fill-extrusion-opacity": 1,
-      "fill-extrusion-emissive-strength": isDarkPreset(preset) ? 0.9 : 0.25,
-      "fill-extrusion-vertical-gradient": false,
-      "fill-extrusion-ambient-occlusion-intensity": 0.3,
-      "fill-extrusion-color-transition": noTransition,
-      "fill-extrusion-height-transition": noTransition,
-      "fill-extrusion-opacity-transition": noTransition,
+    layout: {
+      "model-id": towerModelIdExpr(preset),
+      // All towers of a project share one anchor point; without this Mapbox keeps
+      // only the first model per lookup cell and the other towers vanish.
+      "model-allow-density-reduction": false,
     },
-  });
-  // Balcony slabs: one thin ring per floor in the accent colour (the facade banding).
-  map.addLayer({
-    id: LYR.projectSlabs,
-    type: "fill-extrusion",
-    source: SRC.projects3d,
-    slot: SLOT.lines,
-    filter: ["==", ["get", "kind"], "slab"],
-    minzoom: Z_PROJ - 0.5,
     paint: {
-      "fill-extrusion-color": ["get", "color"],
-      "fill-extrusion-height": ["get", "height"],
-      "fill-extrusion-base": ["get", "base"],
-      "fill-extrusion-opacity": 1,
-      "fill-extrusion-emissive-strength": isDarkPreset(preset) ? 1 : 0.3,
-      "fill-extrusion-vertical-gradient": false,
-      "fill-extrusion-color-transition": noTransition,
-      "fill-extrusion-height-transition": noTransition,
-      "fill-extrusion-opacity-transition": noTransition,
+      "model-emissive-strength": towerEmissiveFor(preset),
+      "model-cast-shadows": true,
+      "model-receive-shadows": true,
+      "model-ambient-occlusion-intensity": 0.6,
+      "model-roughness": 0.85,
+      "model-opacity": 1,
     },
   });
   map.addLayer({
@@ -460,10 +463,16 @@ export function addDataLayers(map: Map, preset: LightPreset) {
       "text-allow-overlap": true,
       "text-anchor": "bottom",
       "text-offset": [0, -0.8],
-      "symbol-z-elevate": true, // sits on the rendered rooftops
+      "symbol-elevation-reference": "ground",
       "symbol-z-order": "source",
     },
-    paint: { "text-color": "#ffffff", "text-halo-color": "rgba(2,6,23,0.9)", "text-halo-width": 1.5 },
+    paint: {
+      "text-color": "#ffffff",
+      "text-halo-color": "rgba(2,6,23,0.9)",
+      "text-halo-width": 1.5,
+      // Float just above the tallest tower (metres from the ground, from the geometry).
+      "symbol-z-offset": ["+", ["coalesce", ["get", "top"], 0], 4],
+    },
   });
 
   // ---- Invisible hit layers ----
@@ -556,8 +565,9 @@ export function applyPresetColors(map: Map, preset: LightPreset) {
   // 3D project renderings: lit by the sun in day/dawn, self-lit under dusk/night.
   const dark = isDarkPreset(preset);
   set(LYR.projectPodium, "fill-extrusion-emissive-strength", dark ? 0.7 : 0.2);
-  set(LYR.projectTowers, "fill-extrusion-emissive-strength", dark ? 0.9 : 0.25);
-  set(LYR.projectSlabs, "fill-extrusion-emissive-strength", dark ? 1 : 0.3);
+  set(LYR.projectModel, "model-emissive-strength", towerEmissiveFor(preset));
+  // Switch the towers between the plain and the lit-windows glTF variant.
+  if (map.getLayer(LYR.projectModel)) map.setLayoutProperty(LYR.projectModel, "model-id", towerModelIdExpr(preset));
 }
 
 export function setVisibility(map: Map, layerId: string, visible: boolean) {

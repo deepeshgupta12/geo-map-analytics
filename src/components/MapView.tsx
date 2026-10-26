@@ -33,6 +33,7 @@ import { FeatureIndex, bboxToBounds } from "@/lib/featureIndex";
 import { carryForward, type FilledDoc } from "@/lib/carryForward";
 import { loadProjects, plotCentroid, type LoadedProject } from "@/lib/projects";
 import { buildProject3D } from "@/lib/projectGeometry";
+import { MODEL_VARIANTS, buildTowerPoints, currentTowers, towerModelId, towerModelUrl } from "@/lib/towerModel";
 import { toCsv, downloadText } from "@/lib/export";
 import type { DimDoc, DimItem, Level, MetricsDoc, PinnedSelection } from "@/lib/types";
 import { toNumericId, normalizeName } from "@/lib/types";
@@ -1163,10 +1164,12 @@ export default function MapView() {
 
       // ---- 3D project renderings: pick the building (towers or podium) under a point ----
       const pickProject3D = (point: mapboxgl.PointLike): { project: LoadedProject; towerName: string | null } | null => {
-        if (!map.getLayer(LYR.projectTowers)) return null;
+        // Tower models first (hit-tested by Mapbox on the model's bounds), then the podium.
+        const layers = [LYR.projectModel, LYR.projectPodium].filter((id) => map.getLayer(id));
+        if (!layers.length) return null;
         let feats: RenderedFeature[] = [];
         try {
-          feats = map.queryRenderedFeatures(point, { layers: [LYR.projectTowers, LYR.projectPodium] }) as unknown as RenderedFeature[];
+          feats = map.queryRenderedFeatures(point, { layers }) as unknown as RenderedFeature[];
         } catch {
           return null;
         }
@@ -1622,14 +1625,42 @@ export default function MapView() {
   }, [pinA, pinB, mapReady, styleEpoch]);
 
   // ---------------------------------------------------------------------------
-  // 3D project renderings: facade pattern images + podium/tower geometry
+  // 3D project renderings: podium/outline/label geometry + textured glTF towers
   // ---------------------------------------------------------------------------
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !mapReady) return;
     const src = map.getSource(SRC.projects3d) as mapboxgl.GeoJSONSource | undefined;
-    if (!src) return;
-    src.setData({ type: "FeatureCollection", features: projects.flatMap((p) => buildProject3D(p)) });
+    if (src) src.setData({ type: "FeatureCollection", features: projects.flatMap((p) => buildProject3D(p)) });
+
+    const modelSrc = map.getSource(SRC.projectsModel) as mapboxgl.GeoJSONSource | undefined;
+    if (!modelSrc) return;
+    // Register every tower GLB (both light variants) before the points reference
+    // them; a style reload drops the registry, so this re-runs per styleEpoch
+    // from the blob-URL cache in lib/towerModel.
+    const points: GeoJSON.Feature[] = [];
+    for (const p of projects) {
+      let registered = 0;
+      for (const { index } of currentTowers(p)) {
+        for (const variant of MODEL_VARIANTS) {
+          const id = towerModelId(p.slug, index, variant);
+          if (map.hasModel(id)) {
+            registered++;
+            continue;
+          }
+          const url = towerModelUrl(p, index, variant);
+          if (!url) continue;
+          try {
+            map.addModel(id, url);
+            registered++;
+          } catch (err) {
+            console.warn("[gm] addModel failed", id, err);
+          }
+        }
+      }
+      if (registered) points.push(...buildTowerPoints(p));
+    }
+    modelSrc.setData({ type: "FeatureCollection", features: points });
   }, [projects, mapReady, styleEpoch]);
 
   // ---------------------------------------------------------------------------

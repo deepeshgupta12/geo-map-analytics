@@ -1,6 +1,6 @@
 {
   "name": "geo-map-analytics",
-  "version": "4.1.0",
+  "version": "4.4.0",
   "description": "Map-first real-estate analytics for Mumbai: zoom-driven drill-down from micromarkets to localities to projects, monthly choropleths with a smooth timeline, project heatmap, A/B compare and shareable views on Mapbox GL.",
   "license": "MIT",
   "author": "Deepesh Gupta",
