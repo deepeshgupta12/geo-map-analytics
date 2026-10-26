@@ -2,17 +2,21 @@
 
 Map-first real-estate analytics for Mumbai, built on Mapbox GL JS and Next.js. The map drills down with the zoom: **micromarkets** at city level, the **localities** of the micromarket you are looking at from z12, and the **projects** of the locality you are in from z14. Monthly metrics (asking price, rent) are painted as a choropleth with a smooth, GPU cross-faded timeline, project concentration can be shown as a heatmap, and any area can be pinned for an A/B comparison. Every view is a shareable URL.
 
-![Night 3D city view with the micromarket choropleth](docs/images/city-night-3d.jpg)
+![Night 3D city view with the micromarket choropleth and count bubbles](docs/screenshots/01-city-overview.jpg)
 
 ---
 
 ## Screenshots
 
+All feature screenshots live in [`docs/screenshots/`](docs/screenshots/); [`docs/FEATURES.md`](docs/FEATURES.md) lists every feature with one line on the integration behind it.
+
 | | |
 |---|---|
-| ![Hovering a micromarket highlights it](docs/images/hover-micromarket.jpg) Hover highlights a micromarket; labels are placed at computed centroids. | ![Localities of the focused micromarket during playback](docs/images/localities-playback.jpg) Inside a micromarket: only its localities are painted, timeline playing. |
-| ![Project concentration heatmap](docs/images/heatmap.jpg) Heatmap of ~31k project locations. | ![Project dots inside a locality](docs/images/projects-band.jpg) Projects of the focused locality, coloured by status. |
-| ![Day light with the faded basemap theme](docs/images/day-faded.jpg) Day light, faded theme: the palette flips so the darkest step is the highest value. | |
+| ![Hovering a micromarket highlights it](docs/screenshots/02-hover-micromarket.jpg) Hover highlights a micromarket with a cyan outline and a metric card. | ![Localities of the focused micromarket with count bubbles](docs/screenshots/05-localities-bubbles.jpg) Inside Mumbai South: only its localities are painted, one count bubble each. |
+| ![Timeline playback at locality level](docs/screenshots/06-timeline-playback.jpg) Timeline playing: months cross-fade on the GPU. | ![Project dots inside a locality](docs/screenshots/08-project-dots.jpg) Projects of the focused locality, coloured by status. |
+| ![Textured 3D towers at night](docs/screenshots/09-3d-project-night.jpg) Godrej Horizon Wadala at night: textured glTF towers with lit windows on a Mapbox model layer. | ![The same towers by day](docs/screenshots/10-3d-project-day.jpg) The same towers by day, sunlit with cast shadows. |
+| ![Project card and orbit](docs/screenshots/12-project-card-orbit.jpg) Clicking a tower opens the project card and starts the slow orbit. | ![Pinned compare](docs/screenshots/13-compare-pins.jpg) Pin A and B: value, n, delta vs previous month, sparkline. |
+| ![Project concentration heatmap](docs/screenshots/03-heatmap.jpg) Heatmap of ~31k project locations. | ![Day light with the faded basemap theme](docs/screenshots/14-day-faded-theme.jpg) Day light, faded theme: the palette flips so the darkest step is the highest value. |
 
 ---
 
