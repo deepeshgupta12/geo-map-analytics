@@ -2,7 +2,7 @@
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import mapboxgl, { MapMouseEvent } from "mapbox-gl";
-import type { Map as MapboxMap, FitBoundsOptions, LngLatLike } from "mapbox-gl";
+import type { Map as MapboxMap, FitBoundsOptions, LngLatLike, FilterSpecification } from "mapbox-gl";
 import { TILESETS } from "@/config/tilesets";
 import { METRICS, getMetricDef } from "@/config/metrics";
 import {
@@ -31,6 +31,8 @@ import { addDataSources, addDataLayers, applyPresetColors, setVisibility, setFil
 import { ChoroplethEngine } from "@/lib/choropleth";
 import { FeatureIndex, bboxToBounds } from "@/lib/featureIndex";
 import { carryForward, type FilledDoc } from "@/lib/carryForward";
+import { loadProjects, plotCentroid, type LoadedProject } from "@/lib/projects";
+import { buildProject3D } from "@/lib/projectGeometry";
 import { toCsv, downloadText } from "@/lib/export";
 import type { DimDoc, DimItem, Level, MetricsDoc, PinnedSelection } from "@/lib/types";
 import { toNumericId, normalizeName } from "@/lib/types";
@@ -209,6 +211,100 @@ function Label({ children }: { children: React.ReactNode }) {
   return <div style={{ fontSize: 12, opacity: 0.9, marginBottom: 4 }}>{children}</div>;
 }
 
+function Stat({ label, value }: { label: string; value: string }) {
+  return (
+    <div style={{ padding: "6px 8px", border: `1px solid ${UI.panelBorder}`, borderRadius: 6, background: "rgba(255,255,255,0.03)" }}>
+      <div style={{ fontSize: 10, color: UI.mutedText, textTransform: "uppercase", letterSpacing: 0.4 }}>{label}</div>
+      <div style={{ fontSize: 12, fontWeight: 600, marginTop: 2 }}>{value}</div>
+    </div>
+  );
+}
+
+const cardBtn: React.CSSProperties = {
+  fontSize: 12,
+  padding: "6px 10px",
+  border: `1px solid ${UI.controlBorder}`,
+  borderRadius: 8,
+  background: UI.controlBg,
+  color: UI.controlText,
+  cursor: "pointer",
+};
+
+/** Card shown after clicking a rendered project (image, price, configurations, locality, RERA). */
+function ProjectCard({ project, orbiting, onClose, onStopOrbit }: { project: LoadedProject; orbiting: boolean; onClose: () => void; onStopOrbit: () => void }) {
+  const c = project.card;
+  const rera = Array.isArray(c.rera) ? c.rera : c.rera ? [c.rera] : [];
+  const towers = (project.towers ?? []).filter((t) => !t.futureDevelopment);
+  const units = c.units ?? project.units;
+  return (
+    <div
+      style={{
+        position: "absolute",
+        top: 56,
+        left: 10,
+        width: 330,
+        background: "rgba(11,15,25,0.94)",
+        color: UI.panelText,
+        border: `1px solid ${UI.panelBorder}`,
+        borderRadius: 10,
+        overflow: "hidden",
+        boxShadow: "0 10px 30px rgba(0,0,0,0.45)",
+        fontSize: 12,
+      }}
+    >
+      {/* eslint-disable-next-line @next/next/no-img-element -- static project asset, no optimisation needed */}
+      <img src={`${project.baseUrl}/${c.image}`} alt={project.name} style={{ width: "100%", height: 150, objectFit: "cover", display: "block" }} />
+      <div style={{ padding: 12 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
+          <div>
+            <div style={{ fontWeight: 700, fontSize: 15 }}>{project.name}</div>
+            <div style={{ color: UI.mutedText }}>
+              {[project.developer, [project.locality, project.micromarket].filter(Boolean).join(", ")].filter(Boolean).join(" · ")}
+            </div>
+          </div>
+          <button onClick={onClose} style={{ ...cardBtn, padding: "2px 8px" }} title="Close (Esc)">
+            ×
+          </button>
+        </div>
+        <div style={{ marginTop: 8, fontSize: 16, fontWeight: 700 }}>{c.priceRange ?? "Price on request"}</div>
+        {c.pricePsf ? <div style={{ color: UI.mutedText }}>₹{c.pricePsf.toLocaleString("en-IN")} per sq ft</div> : null}
+        <div style={{ marginTop: 8, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+          <Stat label="Configurations" value={c.configurations?.length ? c.configurations.join(", ") : "—"} />
+          <Stat label="Size" value={c.sizeRange ?? "—"} />
+          <Stat label="Units" value={typeof units === "number" ? units.toLocaleString("en-IN") : "—"} />
+          <Stat label="Towers · floors" value={towers.length ? `${towers.length} · ${towers.map((t) => t.floors ?? "?").join(" / ")}` : "—"} />
+          <Stat label="Status" value={project.status ?? "—"} />
+          <Stat label="Possession" value={project.possession ?? "—"} />
+        </div>
+        {rera.length ? (
+          <div style={{ marginTop: 8, color: UI.mutedText }}>
+            RERA {rera.join(" · ")}
+            {c.reraUrl ? (
+              <>
+                {" · "}
+                <a href={c.reraUrl} target="_blank" rel="noreferrer" style={{ color: "#93c5fd" }}>
+                  view
+                </a>
+              </>
+            ) : null}
+          </div>
+        ) : null}
+        {project.plot?.placeholder ? <div style={{ marginTop: 6, color: UI.mutedText }}>Plot outline is a placeholder; towers are placed from the master plan analysis.</div> : null}
+        <div style={{ marginTop: 10, display: "flex", gap: 8 }}>
+          {orbiting ? (
+            <button onClick={onStopOrbit} style={cardBtn}>
+              Stop orbit
+            </button>
+          ) : null}
+          <button onClick={onClose} style={cardBtn}>
+            Close
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // -----------------------------------------------------------------------------
 // Component
 // -----------------------------------------------------------------------------
@@ -243,6 +339,10 @@ export default function MapView() {
   const [focus, setFocus] = useState<Focus>(NO_FOCUS);
   const [projectsInView, setProjectsInView] = useState(0);
   const [orbiting, setOrbiting] = useState(false);
+  // Projects with a folder under public/projects (3D rendering + card).
+  const [projects, setProjects] = useState<LoadedProject[]>([]);
+  const projectsRef = useRef<LoadedProject[]>([]);
+  const [selectedProject, setSelectedProject] = useState<LoadedProject | null>(null);
   // Bumped whenever the style (re)loads so every map-touching effect re-applies itself.
   const [styleEpoch, setStyleEpoch] = useState(0);
   // Bumped when the engine's join rules change and the choropleth must re-render.
@@ -531,6 +631,23 @@ export default function MapView() {
         console.warn("Dim docs not found (run scripts/build_dims_public.py):", e);
       }
     })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // ---------------------------------------------------------------------------
+  // Projects with inputs (public/projects/index.json) -> 3D renderings + cards
+  // ---------------------------------------------------------------------------
+  useEffect(() => {
+    let cancelled = false;
+    loadProjects()
+      .then((list) => {
+        if (cancelled) return;
+        projectsRef.current = list;
+        setProjects(list);
+      })
+      .catch((e) => console.warn("projects failed to load:", e));
     return () => {
       cancelled = true;
     };
@@ -1033,6 +1150,23 @@ export default function MapView() {
         };
       };
 
+      // ---- 3D project renderings: pick the building (towers or podium) under a point ----
+      const pickProject3D = (point: mapboxgl.PointLike): { project: LoadedProject; towerName: string | null } | null => {
+        if (!map.getLayer(LYR.projectTowers)) return null;
+        let feats: RenderedFeature[] = [];
+        try {
+          feats = map.queryRenderedFeatures(point, { layers: [LYR.projectTowers, LYR.projectPodium] }) as unknown as RenderedFeature[];
+        } catch {
+          return null;
+        }
+        const f = feats[0];
+        if (!f) return null;
+        const props = (f.properties ?? {}) as Record<string, unknown>;
+        const project = projectsRef.current.find((p) => p.slug === props.slug);
+        if (!project) return null;
+        return { project, towerName: props.kind === "tower" && typeof props.name === "string" ? props.name : null };
+      };
+
       // ---- orbit: one revolution per minute around a project, until the user moves the map ----
       const orbit = { active: false };
       const orbitStep = () => {
@@ -1080,6 +1214,21 @@ export default function MapView() {
         rafId = null;
         const pt = hoverPointRef.current;
         if (!pt) return;
+        const p3 = pickProject3D([pt.x, pt.y]);
+        if (p3) {
+          map.getCanvas().style.cursor = "pointer";
+          setHover(null, null);
+          setHoverInfo(null);
+          popup
+            .setLngLat(map.unproject([pt.x, pt.y]))
+            .setHTML(
+              `<div class="gm-pop-title">${escapeHtml(p3.project.name)}</div><div>${escapeHtml(p3.towerName ?? "Podium")}${
+                p3.project.status ? ` · ${escapeHtml(p3.project.status)}` : ""
+              }</div><div class="gm-pop-muted">click for details</div>`
+            )
+            .addTo(map);
+          return;
+        }
         const bubble = pickBubble([pt.x, pt.y]);
         if (bubble) {
           map.getCanvas().style.cursor = "pointer";
@@ -1173,6 +1322,14 @@ export default function MapView() {
 
       // ---- click: pin + drill ----
       const onClick = (e: MapMouseEvent) => {
+        // A rendered building opens its card and starts the orbit around the plot.
+        const p3 = pickProject3D(e.point);
+        if (p3) {
+          setSelectedProject(p3.project);
+          const c = plotCentroid(p3.project);
+          startOrbit([c[0], c[1]]);
+          return;
+        }
         const bubble = pickBubble(e.point);
         if (bubble) {
           zoomToArea(bubble.level, bubble.id, bubble.name, null);
@@ -1268,6 +1425,7 @@ export default function MapView() {
       if (ev.key === "Escape") {
         stopPlayback();
         stopOrbitRef.current?.();
+        setSelectedProject(null);
         setPinA(null);
         setPinB(null);
         setClickInfo(null);
@@ -1387,9 +1545,7 @@ export default function MapView() {
     setVisibility(map, LYR.mmLabels, showLabels);
     setVisibility(map, LYR.locLabels, showLabels);
     setVisibility(map, LYR.countMm, showCounts);
-    setVisibility(map, LYR.countMmText, showCounts);
     setVisibility(map, LYR.countLoc, showCounts);
-    setVisibility(map, LYR.countLocText, showCounts);
     // Layers that were hidden skipped preset recolouring; apply it now that they are visible.
     applyPresetColors(map, lightPreset);
     engineRef.current?.setOpacityLevel(showHeat ? 0.45 : CHOROPLETH_OPACITY);
@@ -1411,19 +1567,25 @@ export default function MapView() {
       for (const id of locLayers) setFilterSafe(map, id, filter);
       setFilterSafe(map, LYR.locLabels, FILTERS.labelsLevelInMm("localities", focus.mmId!));
       setFilterSafe(map, LYR.countLoc, FILTERS.labelsLevelInMm("localities", focus.mmId!));
-      setFilterSafe(map, LYR.countLocText, FILTERS.labelsLevelInMm("localities", focus.mmId!));
       setFilterSafe(map, LYR.mmMask, FILTERS.notId(focus.mmId!));
     } else {
       for (const id of locLayers) setFilterSafe(map, id, null);
       setFilterSafe(map, LYR.locLabels, FILTERS.labelsLevel("localities"));
-      setFilterSafe(map, LYR.countLoc, FILTERS.labelsLevel("localities"));
-      setFilterSafe(map, LYR.countLocText, FILTERS.labelsLevel("localities"));
+      // Locality bubbles belong to a focused micromarket; with the restriction on and
+      // nothing focused yet, show none rather than every locality in the city.
+      const locBubbles = restrictLoc ? FILTERS.labelsLevelInMm("localities", -1) : FILTERS.labelsLevel("localities");
+      setFilterSafe(map, LYR.countLoc, locBubbles);
       setFilterSafe(map, LYR.mmMask, FILTERS.noFeature);
     }
 
-    const projFocused = restrictProj && focus.locId !== null;
-    setFilterSafe(map, LYR.projectsCircle, projFocused ? FILTERS.projectsInLocality(focus.locId!) : null);
-  }, [focus, restrictLoc, restrictProj, locIdsByMm, mapReady, styleEpoch]);
+    // Project dots: restricted to the focused locality, and never for a project that
+    // has a 3D rendering (the building itself is the click target there).
+    const rendered = projects.map((p) => p.ids?.project).filter((id): id is number => typeof id === "number");
+    const parts: FilterSpecification[] = [];
+    if (restrictProj && focus.locId !== null) parts.push(FILTERS.projectsInLocality(focus.locId));
+    if (rendered.length) parts.push(["!", ["in", ["id"], ["literal", rendered]]] as unknown as FilterSpecification);
+    setFilterSafe(map, LYR.projectsCircle, parts.length ? (["all", ...parts] as unknown as FilterSpecification) : null);
+  }, [focus, restrictLoc, restrictProj, locIdsByMm, projects, mapReady, styleEpoch]);
 
   // ---------------------------------------------------------------------------
   // Pins
@@ -1447,6 +1609,17 @@ export default function MapView() {
     apply(pinA, "A");
     apply(pinB, "B");
   }, [pinA, pinB, mapReady, styleEpoch]);
+
+  // ---------------------------------------------------------------------------
+  // 3D project renderings: facade pattern images + podium/tower geometry
+  // ---------------------------------------------------------------------------
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapReady) return;
+    const src = map.getSource(SRC.projects3d) as mapboxgl.GeoJSONSource | undefined;
+    if (!src) return;
+    src.setData({ type: "FeatureCollection", features: projects.flatMap((p) => buildProject3D(p)) });
+  }, [projects, mapReady, styleEpoch]);
 
   // ---------------------------------------------------------------------------
   // Choropleth: legend/stops
@@ -1806,6 +1979,18 @@ export default function MapView() {
               </div>
             ) : null}
           </div>
+        ) : null}
+
+        {selectedProject ? (
+          <ProjectCard
+            project={selectedProject}
+            orbiting={orbiting}
+            onClose={() => {
+              setSelectedProject(null);
+              stopOrbitRef.current?.();
+            }}
+            onStopOrbit={() => stopOrbitRef.current?.()}
+          />
         ) : null}
       </div>
 

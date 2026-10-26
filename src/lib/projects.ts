@@ -8,12 +8,27 @@ export type LngLat = [number, number];
 
 export type TowerSpec = {
   name: string;
+  phase?: string | null;
+  rera?: string | null;
+  wings?: string[];
   floors: number | null;
   heightM: number | null;
   /** Polygon ring(s) in [lng, lat] if the tower footprint is known. */
   footprint: LngLat[][] | null;
   /** Rotation of the tower's front from north, clockwise, in degrees. */
   headingDeg: number | null;
+  /** "H" renders a twin-wing block from the footprint rectangle; anything else uses the ring as-is. */
+  shape?: string | null;
+  /** Future phases are never extruded (dashed ground outline only). */
+  futureDevelopment?: boolean;
+};
+
+export type FutureDevelopmentSpec = {
+  name: string;
+  footprint?: LngLat[][] | null;
+  render?: boolean;
+  source?: string;
+  note?: string;
 };
 
 export type ProjectSpec = {
@@ -21,19 +36,25 @@ export type ProjectSpec = {
   name: string;
   developer?: string | null;
   status?: string | null;
+  possession?: string | null;
   ids: { project: number | null; locality: number | null; micromarket: number | null };
   locality?: string | null;
   micromarket?: string | null;
   location: { lng: number; lat: number };
   plot: { type: "Polygon"; coordinates: LngLat[][]; placeholder?: boolean };
+  areaAcres?: number | null;
   towerCount: number | null;
   floors: number | null;
   units: number | null;
+  podiumLevels?: number | null;
   towers: TowerSpec[];
-  masterPlan: { image: string; attached?: boolean };
+  futureDevelopment?: FutureDevelopmentSpec[];
+  facade?: { base: string; accent: string; glass: string };
+  masterPlan: { image: string; attached?: boolean; analysis?: string };
   model: {
-    file: string;
+    file: string | null;
     attached?: boolean;
+    procedural?: boolean;
     units?: "metres";
     scale?: number;
     headingDeg?: number;
@@ -46,7 +67,11 @@ export type ProjectSpec = {
     priceRange: string | null;
     pricePsf: number | null;
     configurations: string[];
-    rera?: string | null;
+    sizeRange?: string | null;
+    units?: number | null;
+    totalArea?: string | null;
+    rera?: string | string[] | null;
+    reraUrl?: string | null;
     url?: string | null;
   };
 };

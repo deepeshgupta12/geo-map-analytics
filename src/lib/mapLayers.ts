@@ -22,7 +22,9 @@ import {
   STATUS_GROUPS,
   STATUS_OTHER_COLOR,
   BUBBLE,
+  isDarkPreset,
 } from "@/config/layers";
+import { BUBBLE_IMAGE_ID, bubbleImageOptions, bubbleSprite } from "@/lib/bubbleSprite";
 
 type Expr = ExpressionSpecification;
 const expr = (e: unknown) => e as Expr;
@@ -61,6 +63,12 @@ export function addDataSources(map: Map) {
   }
   if (!map.getSource(SRC.counts)) {
     map.addSource(SRC.counts, {
+      type: "geojson",
+      data: { type: "FeatureCollection", features: [] },
+    });
+  }
+  if (!map.getSource(SRC.projects3d)) {
+    map.addSource(SRC.projects3d, {
       type: "geojson",
       data: { type: "FeatureCollection", features: [] },
     });
@@ -316,85 +324,146 @@ export function addDataLayers(map: Map, preset: LightPreset) {
   // Micromarket totals at city zoom, locality totals in the localities band; both
   // sit just below the area name label and dissolve as the next band takes over.
   const bubbleFont = ["DIN Pro Bold", "Arial Unicode MS Bold"];
-  const mmFade = expr(["interpolate", ["linear"], ["zoom"], Z_LOC - 0.3, 0.95, Z_LOC + 0.3, 0]);
-  const locFade = expr(["interpolate", ["linear"], ["zoom"], Z_LOC - 0.3, 0, Z_LOC + 0.3, 0.95, Z_PROJ - 0.4, 0.95, Z_PROJ + 0.3, 0]);
+  // Micromarket bubbles live strictly below Z_LOC, locality bubbles strictly from Z_LOC
+  // (and only inside the focused micromarket, see the filter effect); each dissolves
+  // where the next drill-down level takes over.
+  const mmFade = expr(["interpolate", ["linear"], ["zoom"], Z_LOC - 0.3, 0.95, Z_LOC, 0]);
+  const locFade = expr(["interpolate", ["linear"], ["zoom"], Z_LOC, 0.95, Z_PROJ - 0.4, 0.95, Z_PROJ + 0.3, 0]);
+
+  // One symbol per bubble: a nine-slice disc icon fitted around the number
+  // (`icon-text-fit`), so the disc and the count can never drift apart under pitch.
+  if (!map.hasImage(BUBBLE_IMAGE_ID)) map.addImage(BUBBLE_IMAGE_ID, bubbleSprite(BUBBLE.fill, BUBBLE.stroke), bubbleImageOptions());
+  const bubbleLayout = (textSize: Expr, offsetEm: number) => ({
+    "icon-image": BUBBLE_IMAGE_ID,
+    "icon-text-fit": "both" as const,
+    "icon-text-fit-padding": [5, 9, 4, 9] as [number, number, number, number],
+    "icon-allow-overlap": true,
+    "icon-ignore-placement": true,
+    "text-field": ["to-string", ["get", "count"]] as unknown as Expr,
+    "text-font": bubbleFont,
+    "text-size": textSize,
+    "text-justify": "center" as const,
+    // below the area name label (two lines for micromarkets, one for localities)
+    "text-offset": [0, offsetEm] as [number, number],
+    "text-allow-overlap": true,
+    "text-ignore-placement": true,
+  });
 
   map.addLayer({
     id: LYR.countMm,
-    type: "circle",
-    source: SRC.counts,
-    slot: SLOT.points,
-    filter: ["==", ["get", "level"], "micromarkets"],
-    maxzoom: Z_LOC + 0.3,
-    paint: {
-      "circle-radius": expr(["interpolate", ["linear"], ["sqrt", ["get", "count"]], 1, 12, 40, 18, 90, 24, 140, 30]),
-      "circle-color": BUBBLE.fill,
-      "circle-stroke-color": BUBBLE.stroke,
-      "circle-stroke-width": 2,
-      "circle-opacity": mmFade,
-      "circle-stroke-opacity": mmFade,
-      // Screen-space offset below the (two-line) area label; viewport anchor so the
-      // pitch does not foreshorten it and the number offset lines up.
-      "circle-translate": [0, 44],
-      "circle-translate-anchor": "viewport",
-      "circle-emissive-strength": 1,
-    },
-  });
-  map.addLayer({
-    id: LYR.countMmText,
     type: "symbol",
     source: SRC.counts,
     slot: SLOT.labels,
     filter: ["==", ["get", "level"], "micromarkets"],
-    maxzoom: Z_LOC + 0.3,
-    layout: {
-      "text-field": ["to-string", ["get", "count"]],
-      "text-font": bubbleFont,
-      "text-size": 13,
-      "text-offset": [0, 3.4],
-      "text-allow-overlap": true,
-      "text-ignore-placement": true,
-    },
-    paint: { "text-color": BUBBLE.text, "text-opacity": mmFade },
+    maxzoom: Z_LOC,
+    layout: bubbleLayout(expr(["interpolate", ["linear"], ["sqrt", ["get", "count"]], 1, 12, 140, 15]), 2.7),
+    paint: { "text-color": BUBBLE.text, "text-opacity": mmFade, "icon-opacity": mmFade },
   });
-
   map.addLayer({
     id: LYR.countLoc,
-    type: "circle",
-    source: SRC.counts,
-    slot: SLOT.points,
-    filter: ["==", ["get", "level"], "localities"],
-    minzoom: Z_LOC - 0.3,
-    maxzoom: Z_PROJ + 0.3,
-    paint: {
-      "circle-radius": expr(["interpolate", ["linear"], ["sqrt", ["get", "count"]], 1, 9, 5, 12, 15, 16, 40, 22]),
-      "circle-color": BUBBLE.fill,
-      "circle-stroke-color": BUBBLE.stroke,
-      "circle-stroke-width": 1.5,
-      "circle-opacity": locFade,
-      "circle-stroke-opacity": locFade,
-      "circle-translate": [0, 18],
-      "circle-translate-anchor": "viewport",
-      "circle-emissive-strength": 1,
-    },
-  });
-  map.addLayer({
-    id: LYR.countLocText,
     type: "symbol",
     source: SRC.counts,
     slot: SLOT.labels,
     filter: ["==", ["get", "level"], "localities"],
-    minzoom: Z_LOC - 0.3,
+    minzoom: Z_LOC,
     maxzoom: Z_PROJ + 0.3,
-    layout: {
-      "text-field": ["to-string", ["get", "count"]],
-      "text-font": bubbleFont,
-      "text-size": 11,
-      "text-offset": [0, 1.64],
-      "text-allow-overlap": true,
-      "text-ignore-placement": true,
+    layout: bubbleLayout(expr(["interpolate", ["linear"], ["sqrt", ["get", "count"]], 1, 10, 40, 13]), 1.7),
+    paint: { "text-color": BUBBLE.text, "text-opacity": locFade, "icon-opacity": locFade },
+  });
+
+  // ---- Procedural 3D project renderings (podium + twin-wing towers) ----
+  // Visible from just below the projects band; paint is data-driven from the
+  // GeoJSON built by lib/projectGeometry (height/base in metres, facade pattern).
+  const noTransition = { duration: 0, delay: 0 };
+  map.addLayer({
+    id: LYR.projectPodium,
+    type: "fill-extrusion",
+    source: SRC.projects3d,
+    slot: SLOT.lines,
+    filter: ["==", ["get", "kind"], "podium"],
+    minzoom: Z_PROJ - 1,
+    paint: {
+      "fill-extrusion-color": ["get", "color"],
+      "fill-extrusion-height": ["get", "height"],
+      "fill-extrusion-base": 0,
+      "fill-extrusion-opacity": 0.95,
+      "fill-extrusion-emissive-strength": isDarkPreset(preset) ? 0.7 : 0.2,
+      "fill-extrusion-vertical-gradient": true,
+      "fill-extrusion-ambient-occlusion-intensity": 0.35,
+      "fill-extrusion-color-transition": noTransition,
+      "fill-extrusion-height-transition": noTransition,
+      "fill-extrusion-opacity-transition": noTransition,
     },
-    paint: { "text-color": BUBBLE.text, "text-opacity": locFade },
+  });
+  map.addLayer({
+    id: LYR.projectTowers,
+    type: "fill-extrusion",
+    source: SRC.projects3d,
+    slot: SLOT.lines,
+    filter: ["==", ["get", "kind"], "tower"],
+    minzoom: Z_PROJ - 1,
+    paint: {
+      "fill-extrusion-color": ["get", "color"],
+      "fill-extrusion-height": ["get", "height"],
+      "fill-extrusion-base": ["get", "base"],
+      "fill-extrusion-opacity": 1,
+      "fill-extrusion-emissive-strength": isDarkPreset(preset) ? 0.9 : 0.25,
+      "fill-extrusion-vertical-gradient": false,
+      "fill-extrusion-ambient-occlusion-intensity": 0.3,
+      "fill-extrusion-color-transition": noTransition,
+      "fill-extrusion-height-transition": noTransition,
+      "fill-extrusion-opacity-transition": noTransition,
+    },
+  });
+  // Balcony slabs: one thin ring per floor in the accent colour (the facade banding).
+  map.addLayer({
+    id: LYR.projectSlabs,
+    type: "fill-extrusion",
+    source: SRC.projects3d,
+    slot: SLOT.lines,
+    filter: ["==", ["get", "kind"], "slab"],
+    minzoom: Z_PROJ - 0.5,
+    paint: {
+      "fill-extrusion-color": ["get", "color"],
+      "fill-extrusion-height": ["get", "height"],
+      "fill-extrusion-base": ["get", "base"],
+      "fill-extrusion-opacity": 1,
+      "fill-extrusion-emissive-strength": isDarkPreset(preset) ? 1 : 0.3,
+      "fill-extrusion-vertical-gradient": false,
+      "fill-extrusion-color-transition": noTransition,
+      "fill-extrusion-height-transition": noTransition,
+      "fill-extrusion-opacity-transition": noTransition,
+    },
+  });
+  map.addLayer({
+    id: LYR.projectFuture,
+    type: "line",
+    source: SRC.projects3d,
+    slot: SLOT.lines,
+    filter: ["==", ["get", "kind"], "future"],
+    minzoom: Z_PROJ - 1,
+    paint: { "line-color": "#f59e0b", "line-width": 2, "line-dasharray": [2, 2], "line-emissive-strength": 1 },
+  });
+  map.addLayer({
+    id: LYR.projectLabel,
+    type: "symbol",
+    source: SRC.projects3d,
+    slot: SLOT.labels,
+    filter: ["==", ["get", "kind"], "label"],
+    minzoom: Z_PROJ - 1,
+    layout: {
+      "text-field": ["get", "name"],
+      "text-font": ["DIN Pro Bold", "Arial Unicode MS Bold"],
+      "text-size": 13,
+      "text-transform": "uppercase",
+      "text-letter-spacing": 0.06,
+      "text-allow-overlap": true,
+      "text-anchor": "bottom",
+      "text-offset": [0, -0.8],
+      "symbol-z-elevate": true, // sits on the rendered rooftops
+      "symbol-z-order": "source",
+    },
+    paint: { "text-color": "#ffffff", "text-halo-color": "rgba(2,6,23,0.9)", "text-halo-width": 1.5 },
   });
 
   // ---- Invisible hit layers ----
@@ -484,6 +553,11 @@ export function applyPresetColors(map: Map, preset: LightPreset) {
   set(LYR.locLabels, "text-color", c.labelText);
   set(LYR.locLabels, "text-halo-color", c.labelHalo);
   set(LYR.projectsHeat, "heatmap-color", heatColorExpr(preset));
+  // 3D project renderings: lit by the sun in day/dawn, self-lit under dusk/night.
+  const dark = isDarkPreset(preset);
+  set(LYR.projectPodium, "fill-extrusion-emissive-strength", dark ? 0.7 : 0.2);
+  set(LYR.projectTowers, "fill-extrusion-emissive-strength", dark ? 0.9 : 0.25);
+  set(LYR.projectSlabs, "fill-extrusion-emissive-strength", dark ? 1 : 0.3);
 }
 
 export function setVisibility(map: Map, layerId: string, visible: boolean) {

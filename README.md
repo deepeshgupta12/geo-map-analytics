@@ -62,6 +62,11 @@ Dashboards are slow for spatial exploration and GIS suites are overkill for sale
 ### Project orbit
 - Clicking a project dot centres on it and starts a slow orbit, one turn per minute, with the buildings anchored to the ground. Any wheel, drag, touch, Esc or the Stop button ends it. The 3D project renderings will use the same entry point.
 
+### 3D project renderings and project card
+- Projects with a folder under `public/projects/` are rendered in 3D from z13: a podium on the plot and one twin-wing (H-shaped) block per current tower, heights from the floor counts, with a thin balcony slab at every floor in the facade accent colour. The facade is geometry rather than a texture, because patterned extrusions ignore emissive lighting and go black at night; emissive strength is set per light preset so the towers read under day, dusk and night. Blocks flagged `futureDevelopment` are never extruded.
+- Clicking a rendered building opens the project card (photo, price range, ₹/sqft, configurations, size range, units, towers and floors, status, possession, locality and micromarket, RERA ids) and starts the slow orbit around the plot. Escape or the card's buttons close it. The project's plain dot is hidden while its rendering exists.
+- Inputs come from `project.json` (see `public/projects/godrej-horizon-wadala/README.md`), with towers, orientation and podium read from the developer master plan by `scripts/analyze_master_plan.py`.
+
 ### Hover, click, compare
 - Hovering a polygon or project highlights it (cyan outline and tint) with a card showing the metric, count and month; the card refreshes as the timeline moves.
 - Click pins **A**, Shift+Click pins **B**: current value, n, delta vs previous month, sparkline, A − B. Esc clears.
@@ -244,13 +249,13 @@ Headless Chrome is driven over the DevTools protocol (no extra packages): the dr
 - **V4** zoom-driven drill-down (micromarkets → localities → projects), project heatmap, night + 3D default, GPU cross-faded timeline with a fixed scale, validated amber palette with emissive paint, computed labels, panel fixes (shortcuts while typing, stale exports, search), performance (no endless repaint), camera in the share URL, modular layer/engine/index code.
 - **V4.1** night default survives stale URLs, playback follows zoom, spatial membership, canonical-name joins, carry-forward, cyan hover highlight that survives camera moves, click-to-zoom into the next band with sticky focus, cursor-based focus, per-locality project counts script.
 - **V4.2** project count bubbles per micromarket and locality with click-to-zoom, slow orbit around a clicked project, performance mode, lighter rendering (no antialiasing, no preserved drawing buffer, PNG export via render callback), per-project input folders, and `scripts/analyze_master_plan.py` which reads a developer master plan with the Green Open Area Intelligence engine plus the Claude API and writes towers, footprints, podium and orientation into `project.json`. First project folder: Godrej Horizon Wadala.
+- **V4.3** procedural 3D rendering of Godrej Horizon Wadala (podium, three twin-wing towers of 47/47/42 floors with per-floor balcony slabs, future-development block excluded) lit per light preset; project card with photo, price, configurations, units, towers, status, possession and RERA, opened by clicking the building together with the orbit; count bubbles rebuilt as single fitted symbols so the number is always centred, locality bubbles shown only inside the focused micromarket from z12.
 
 ---
 
 ## Roadmap
 
-- 3D project renderings on their plots: a GLB model per project where the developer supplies one, otherwise a procedural model built from the analysed towers and the facade colours; placed on the plot, visible from project zoom, capped to what is in view.
-- Project card on clicking a rendering: image, price range or ₹/sqft, configurations, locality, RERA.
+- More projects in `public/projects/` (the second and third), each through the same master plan analysis; a GLB model layer for projects where the developer supplies one; real plot boundaries replacing the placeholder squares.
 - Mobile tuning after the 3D work.
 - Multi-city support: city switcher, per-city tilesets, dims and metrics.
 - Export polish: legend and title overlay on PNG, richer CSV.

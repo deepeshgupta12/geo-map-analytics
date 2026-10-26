@@ -39,6 +39,7 @@ export const SRC = {
   projects: "projects-src",
   labels: "labels-src", // GeoJSON (computed centroids)
   counts: "counts-src", // GeoJSON (project counts at polygon centroids)
+  projects3d: "projects3d-src", // GeoJSON (procedural podium + towers per project folder)
   dem: "mapbox-dem",
 } as const;
 
@@ -81,11 +82,16 @@ export const LYR = {
   mmLabels: "mm-labels",
   locLabels: "loc-labels",
 
-  // Project count bubbles (circle + number) per micromarket and per locality.
+  // Project count bubbles (one symbol each: disc icon fitted around the number).
   countMm: "count-mm",
-  countMmText: "count-mm-text",
   countLoc: "count-loc",
-  countLocText: "count-loc-text",
+
+  // Procedural 3D project renderings (podium + towers from public/projects/<slug>).
+  projectPodium: "project-podium",
+  projectTowers: "project-towers",
+  projectSlabs: "project-slabs",
+  projectFuture: "project-future",
+  projectLabel: "project-label",
 
   // Invisible hit layers for hover / click.
   hitCity: "city-hit",
