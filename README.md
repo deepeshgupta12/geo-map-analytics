@@ -56,6 +56,12 @@ Dashboards are slow for spatial exploration and GIS suites are overkill for sale
 ### Heatmap
 - Kernel-density heat of all project points (~31k), tuned so dense cores read instead of saturating; the choropleth dims while it is on.
 
+### Count bubbles
+- Project counts per **micromarket** at city zoom and per **locality** inside the focused micromarket (orange discs with the number, placed just below each area's name label). Hover shows the name and count, a click flies into that area. Bubbles dissolve as the project dots take over at z14; localities with a single project get no bubble. Counts are precomputed by `scripts/build_project_counts.mjs` from the project tiles.
+
+### Project orbit
+- Clicking a project dot centres on it and starts a slow orbit, one turn per minute, with the buildings anchored to the ground. Any wheel, drag, touch, Esc or the Stop button ends it. The 3D project renderings will use the same entry point.
+
 ### Hover, click, compare
 - Hovering a polygon or project highlights it (cyan outline and tint) with a card showing the metric, count and month; the card refreshes as the timeline moves.
 - Click pins **A**, Shift+Click pins **B**: current value, n, delta vs previous month, sparkline, A − B. Esc clears.
@@ -63,6 +69,7 @@ Dashboards are slow for spatial exploration and GIS suites are overkill for sale
 
 ### Basemap
 - Mapbox Standard with **night** light and **3D buildings** by default; dawn/day/dusk/night, default/faded/monochrome themes, place/road/POI label toggles, optional terrain.
+- **Performance mode** switches off 3D buildings, landmarks and terrain for slower machines. Antialiasing is off and the canvas is not preserved between frames; PNG export reads it inside a render callback instead.
 
 ### Share and export
 - The URL carries metric, level, month, light, theme, 3D, heatmap, scale, carry-forward, pins and the **camera** (`cam=lng,lat,zoom,pitch,bearing`). Only non-default values are written, and view params are versioned (`v=4`) so stale URLs cannot override new defaults.
@@ -101,15 +108,19 @@ src/
     featureIndex.ts                        # polygon index: centroids, bboxes, spatial membership, labels
     carryForward.ts                        # fills sparse months with the latest earlier value
     quantiles.ts                           # quantile stops, bucket ranges, value collection
+    projects.ts                            # per-project input spec (plot, towers, model, card) + loader
     export.ts, types.ts
 scripts/
   build_dims_public.py                     # public/dim/*.json from data/raw
   build_metrics_v2.py                      # public/metrics/*.json from the monthly workbooks
   build_project_counts.mjs                 # public/dim/project_counts_city13.json from the project tiles
+  analyze_master_plan.py                   # master plan -> towers/footprints/podium/orientation (engine + Claude)
+  requirements.txt                         # python deps for the analysis script
   tileset_layers.mjs                       # prints the source-layer ids of each tileset
 public/
   dim/      localities, micromarkets, project counts
   metrics/  <metric>_<level>.json
+  projects/ index.json + one folder per 3D project (project.json, master plan, photos, analysis/)
 docs/images/                               # screenshots used above
 ```
 
@@ -232,14 +243,15 @@ Headless Chrome is driven over the DevTools protocol (no extra packages): the dr
 - **V3.1** PNG snapshot, CSV of pinned series, copy share URL.
 - **V4** zoom-driven drill-down (micromarkets → localities → projects), project heatmap, night + 3D default, GPU cross-faded timeline with a fixed scale, validated amber palette with emissive paint, computed labels, panel fixes (shortcuts while typing, stale exports, search), performance (no endless repaint), camera in the share URL, modular layer/engine/index code.
 - **V4.1** night default survives stale URLs, playback follows zoom, spatial membership, canonical-name joins, carry-forward, cyan hover highlight that survives camera moves, click-to-zoom into the next band with sticky focus, cursor-based focus, per-locality project counts script.
+- **V4.2** project count bubbles per micromarket and locality with click-to-zoom, slow orbit around a clicked project, performance mode, lighter rendering (no antialiasing, no preserved drawing buffer, PNG export via render callback), per-project input folders, and `scripts/analyze_master_plan.py` which reads a developer master plan with the Green Open Area Intelligence engine plus the Claude API and writes towers, footprints, podium and orientation into `project.json`. First project folder: Godrej Horizon Wadala.
 
 ---
 
 ## Roadmap
 
-- 3D project renderings (per-project models on their plots) with a project card on click (image, price, configurations, locality) and a slow orbit around the selected project.
-- Project count bubbles per locality and micromarket at lower zooms, dissolving into buildings when zoomed in.
-- Performance mode (lighter basemap, no landmarks) and mobile tuning.
+- 3D project renderings on their plots: a GLB model per project where the developer supplies one, otherwise a procedural model built from the analysed towers and the facade colours; placed on the plot, visible from project zoom, capped to what is in view.
+- Project card on clicking a rendering: image, price range or ₹/sqft, configurations, locality, RERA.
+- Mobile tuning after the 3D work.
 - Multi-city support: city switcher, per-city tilesets, dims and metrics.
 - Export polish: legend and title overlay on PNG, richer CSV.
 
