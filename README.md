@@ -275,4 +275,4 @@ Headless Chrome is driven over the DevTools protocol (no extra packages): the dr
 
 ## License
 
-MIT © 2026 Deepesh Gupta. See [LICENSE](LICENSE).
+MIT © 2026 Deepesh Kumar Gupta. See [LICENSE](LICENSE).
